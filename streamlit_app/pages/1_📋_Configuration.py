@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -26,9 +26,9 @@ from services.repositories import (  # noqa: E402
 )
 from utils.auth import do_rerun  # noqa: E402
 from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_date_filters  # noqa: E402
+from utils.filters import use_start_date  # noqa: E402
 
-start_date, end_date = use_date_filters()
+start_dt = use_start_date()
 
 
 def _require_business() -> tuple[str, str]:
@@ -40,14 +40,20 @@ def _require_business() -> tuple[str, str]:
     return business_id, business_name
 
 
-def _date_range_to_datetimes(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    start_dt = datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc)
-    return start_dt, end_dt
-
-
 def _comma_to_list(value: str) -> List[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _is_recent(doc: Dict[str, Any], threshold: datetime) -> bool:
+    stamp = doc.get("updated_at") or doc.get("created_at")
+    if isinstance(stamp, str):
+        try:
+            stamp = datetime.fromisoformat(stamp)
+        except ValueError:
+            stamp = None
+    if isinstance(stamp, datetime):
+        return stamp >= threshold
+    return True
 
 
 def _render_create_form(ad_options: List[dict], business_id: str) -> None:
@@ -97,11 +103,7 @@ def _render_create_form(ad_options: List[dict], business_id: str) -> None:
             st.error(f"Unable to create campaign: {exc}")
 
 
-def _render_campaigns_list(
-    business_id: str,
-    dt_from: datetime,
-    dt_to: datetime,
-) -> List[dict]:
+def _render_campaigns_list(business_id: str) -> List[dict]:
     st.subheader("Campaigns")
     query = st.text_input("Search by name", placeholder="Search campaigns...")
     status_filter = st.selectbox(
@@ -113,8 +115,6 @@ def _render_campaigns_list(
         business_id=business_id,
         q=query or None,
         status=status_filter,
-        dt_from=dt_from,
-        dt_to=dt_to,
         page_size=100,
     )
     campaigns = response["items"]
@@ -281,21 +281,18 @@ def _render_attach_section(ad_options: List[dict], campaigns: List[dict], busine
 
 def main() -> None:
     business_id, business_name = _require_business()
-    st.title(f"Configuration — {business_name}")
-
-
-    dt_from, dt_to = _date_range_to_datetimes(start_date, end_date)
+    st.title(f"Configuration - {business_name}")
 
     ads_response = list_ads(
         business_id=business_id,
         page_size=100,
-        dt_from=dt_from,
-        dt_to=dt_to,
     )
-    ad_options = ads_response["items"]
-
+    ad_options = [
+        ad for ad in ads_response["items"]
+        if _is_recent(ad, start_dt)
+    ]
     _render_create_form(ad_options, business_id)
-    campaigns = _render_campaigns_list(business_id, dt_from, dt_to)
+    campaigns = _render_campaigns_list(business_id)
     _render_attach_section(ad_options, campaigns, business_id)
 
 

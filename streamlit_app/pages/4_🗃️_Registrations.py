@@ -6,7 +6,7 @@ import json
 import sys
 from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -25,10 +25,10 @@ from services.repositories import (  # noqa: E402
 )
 from utils.auth import do_rerun  # noqa: E402
 from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_date_filters  # noqa: E402
+from utils.filters import use_start_date  # noqa: E402
 from utils.formatting import format_currency, format_datetime  # noqa: E402
 
-start_date, end_date = use_date_filters()
+start_dt = use_start_date()
 
 FILTER_STATE_KEY = "registration_filters"
 
@@ -42,25 +42,16 @@ def _require_business() -> tuple[str, str]:
     return business_id, business_name
 
 
-def _date_range_to_datetimes(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    start_dt = datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc)
-    return start_dt, end_dt
-
-
-def _fetch_options(business_id: str, dt_from: datetime, dt_to: datetime) -> tuple[List[dict], List[dict]]:
+def _fetch_options(business_id: str, start_dt: datetime) -> tuple[List[dict], List[dict]]:
     campaigns = list_campaigns(
         business_id=business_id,
         page_size=100,
-        dt_from=dt_from,
-        dt_to=dt_to,
     )["items"]
-    ads = list_ads(
+    ads_response = list_ads(
         business_id=business_id,
         page_size=100,
-        dt_from=dt_from,
-        dt_to=dt_to,
     )["items"]
+    ads = [ad for ad in ads_response if _is_recent_doc(ad, start_dt)]
     return campaigns, ads
 
 
@@ -72,6 +63,18 @@ def _init_filter_state() -> Dict[str, list]:
             "sources": [],
         }
     return st.session_state[FILTER_STATE_KEY]
+
+
+def _is_recent_doc(doc: Dict[str, Any], threshold: datetime) -> bool:
+    stamp = doc.get("timestamp") or doc.get("updated_at") or doc.get("created_at")
+    if isinstance(stamp, str):
+        try:
+            stamp = datetime.fromisoformat(stamp)
+        except ValueError:
+            stamp = None
+    if isinstance(stamp, datetime):
+        return stamp >= threshold
+    return True
 
 
 def _render_create_registration(business_id: str, campaigns: List[dict], ads: List[dict]) -> None:
@@ -205,12 +208,12 @@ def _render_pagination(current_page: int, total: int, page_size: int) -> int:
     return current_page
 
 
-def _render_export(filters: Dict[str, list], business_id: str, dt_from: datetime, dt_to: datetime) -> None:
+def _render_export(filters: Dict[str, list], business_id: str, start_dt: datetime) -> None:
     query = {
         "campaign_id": {"$in": filters["campaign_ids"]} if filters["campaign_ids"] else None,
         "ad_id": {"$in": filters["ad_ids"]} if filters["ad_ids"] else None,
         "source": {"$in": filters["sources"]} if filters["sources"] else None,
-        "timestamp": {"$gte": dt_from, "$lte": dt_to},
+        "timestamp": {"$gte": start_dt},
     }
     buffer = export_registrations_csv(query, business_id=business_id)
     st.download_button(
@@ -285,12 +288,8 @@ def _render_upload(business_id: str) -> None:
 
 def main() -> None:
     business_id, business_name = _require_business()
-    st.title(f"Registrations — {business_name}")
-
-
-    dt_from, dt_to = _date_range_to_datetimes(start_date, end_date)
-
-    campaigns, ads = _fetch_options(business_id, dt_from, dt_to)
+    st.title(f"Registrations - {business_name}")
+    campaigns, ads = _fetch_options(business_id, start_dt)
     _render_create_registration(business_id, campaigns, ads)
 
     filters = _render_filters(campaigns, ads)
@@ -300,8 +299,8 @@ def main() -> None:
         campaign_ids=filters["campaign_ids"],
         ad_ids=filters["ad_ids"],
         sources=filters["sources"],
-        dt_from=dt_from,
-        dt_to=dt_to,
+        dt_from=start_dt,
+        dt_to=None,
         page=current_page,
         page_size=25,
     )
@@ -311,7 +310,7 @@ def main() -> None:
         response["page_size"],
     )
     _render_table(response, filters)
-    _render_export(filters, business_id, dt_from, dt_to)
+    _render_export(filters, business_id, start_dt)
     _render_upload(business_id)
 
 

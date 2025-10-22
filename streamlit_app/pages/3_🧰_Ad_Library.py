@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, time, timezone
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
@@ -22,9 +23,9 @@ from services.repositories import (  # noqa: E402
 )
 from utils.auth import do_rerun  # noqa: E402
 from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_date_filters  # noqa: E402
+from utils.filters import use_start_date  # noqa: E402
 
-start_date, end_date = use_date_filters()
+start_dt = use_start_date()
 
 
 def _require_business() -> tuple[str, str]:
@@ -36,12 +37,6 @@ def _require_business() -> tuple[str, str]:
     return business_id, business_name
 
 
-def _date_range_to_datetimes(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    start_dt = datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc)
-    return start_dt, end_dt
-
-
 def _render_create_ad(business_id: str) -> None:
     st.subheader("Create New Ad")
     with st.form("create-ad", clear_on_submit=True):
@@ -51,11 +46,16 @@ def _render_create_ad(business_id: str) -> None:
         tags_raw = st.text_input("Tags", placeholder="holiday, carousel, evergreen")
         save = st.form_submit_button("Save")
     if save:
+        title = (title or "").strip()
+        tags = [str(t).strip() for t in (tags_raw.split(",") if tags_raw else []) if str(t).strip()]
+        status = status or "active"
         payload = {
+            "ad_id": str(uuid4()),
             "title": title,
-            "creative_url": creative_url or None,
+            "creative_url": (creative_url or "").strip(),
             "status": status,
-            "tags": [tag.strip() for tag in tags_raw.split(",") if tag.strip()],
+            "tags": tags,
+            "business_id": business_id,
         }
         try:
             with st.spinner("Saving ad..."):
@@ -66,7 +66,19 @@ def _render_create_ad(business_id: str) -> None:
             st.error(f"Unable to create ad: {exc}")
 
 
-def _render_ad_list(business_id: str, dt_from: datetime, dt_to: datetime) -> None:
+def _is_recent_ad(doc: dict, threshold: datetime) -> bool:
+    stamp = doc.get("updated_at") or doc.get("created_at")
+    if isinstance(stamp, str):
+        try:
+            stamp = datetime.fromisoformat(stamp)
+        except ValueError:
+            stamp = None
+    if isinstance(stamp, datetime):
+        return stamp >= threshold
+    return True
+
+
+def _render_ad_list(business_id: str, start_dt: datetime) -> None:
     st.subheader("Ad Library")
     search = st.text_input("Search ads", placeholder="Search by title")
     status_filter = st.selectbox(
@@ -81,10 +93,8 @@ def _render_ad_list(business_id: str, dt_from: datetime, dt_to: datetime) -> Non
         status=status_filter,
         tags=[tag_filter] if tag_filter else None,
         page_size=100,
-        dt_from=dt_from,
-        dt_to=dt_to,
     )
-    ads = response["items"]
+    ads = [ad for ad in response["items"] if _is_recent_ad(ad, start_dt)]
     if not ads:
         st.info("No ads saved yet. Create an ad to populate the library.")
         return
@@ -154,13 +164,10 @@ def _render_edit_ad(ad: dict, business_id: str) -> None:
 
 def main() -> None:
     business_id, business_name = _require_business()
-    st.title(f"Ad Library — {business_name}")
-
-
-    dt_from, dt_to = _date_range_to_datetimes(start_date, end_date)
+    st.title(f"Ad Library - {business_name}")
 
     _render_create_ad(business_id)
-    _render_ad_list(business_id, dt_from, dt_to)
+    _render_ad_list(business_id, start_dt)
 
 
 if __name__ == "__main__":

@@ -11,32 +11,36 @@ from services.db import get_db
 
 
 def _match_base(
-    business_id: str,
+    business_id: Optional[str],
     dt_from: Optional[datetime],
-    dt_to: Optional[datetime],
     campaign_ids: Optional[Iterable[str]] = None,
     ad_ids: Optional[Iterable[str]] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> Dict[str, object]:
-    match: Dict[str, object] = {"business_id": business_id}
-    if dt_from and dt_to:
-        match["timestamp"] = {"$gte": dt_from, "$lte": dt_to}
+    match: Dict[str, object] = {}
+    if business_id:
+        match["business_id"] = business_id
+    if dt_from:
+        match["timestamp"] = {"$gte": dt_from}
     if campaign_ids:
         match["campaign_id"] = {"$in": list(campaign_ids)}
     if ad_ids:
         match["ad_id"] = {"$in": list(ad_ids)}
+    if sources:
+        match["source"] = {"$in": list(sources)}
     return match
 
 
 def kpis(
     db: Optional[Database],
     dt_from: Optional[datetime],
-    dt_to: Optional[datetime],
     business_id: str,
     campaign_ids: Optional[Iterable[str]] = None,
     ad_ids: Optional[Iterable[str]] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> Dict[str, float]:
     db = db or get_db()
-    match = _match_base(business_id, dt_from, dt_to, campaign_ids, ad_ids)
+    match = _match_base(business_id, dt_from, campaign_ids, ad_ids, sources)
     pipeline = [
         {"$match": match},
         {
@@ -115,13 +119,13 @@ def kpis(
 def timeseries_daily(
     db: Optional[Database],
     dt_from: Optional[datetime],
-    dt_to: Optional[datetime],
     business_id: str,
     campaign_ids: Optional[Iterable[str]] = None,
     ad_ids: Optional[Iterable[str]] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, object]]:
     db = db or get_db()
-    match = _match_base(business_id, dt_from, dt_to, campaign_ids, ad_ids)
+    match = _match_base(business_id, dt_from, campaign_ids, ad_ids, sources)
     pipeline = [
         {"$match": match},
         {
@@ -130,6 +134,7 @@ def timeseries_daily(
                     "$dateTrunc": {
                         "date": "$timestamp",
                         "unit": "day",
+                        "timezone": "UTC",
                     }
                 },
                 "messages": {"$sum": {"$ifNull": ["$messages", 0]}},
@@ -151,13 +156,6 @@ def timeseries_daily(
                 "impressions": 1,
                 "clicks": 1,
                 "registrations": 1,
-                "cpr": {
-                    "$cond": [
-                        {"$gt": ["$registrations", 0]},
-                        {"$divide": ["$spent", "$registrations"]},
-                        0,
-                    ]
-                },
             }
         },
     ]
@@ -167,11 +165,13 @@ def timeseries_daily(
 def campaign_rollup(
     db: Optional[Database],
     dt_from: Optional[datetime],
-    dt_to: Optional[datetime],
     business_id: str,
+    campaign_ids: Optional[Iterable[str]] = None,
+    ad_ids: Optional[Iterable[str]] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, object]]:
     db = db or get_db()
-    match = _match_base(business_id, dt_from, dt_to)
+    match = _match_base(business_id, dt_from, campaign_ids, ad_ids, sources)
     pipeline = [
         {"$match": match},
         {
@@ -239,43 +239,42 @@ def campaign_rollup(
 
 
 def ad_performance(
-    db: Optional[Database],
-    dt_from: Optional[datetime],
-    dt_to: Optional[datetime],
+    *,
+    db: Optional[Database] = None,
+    dt_from: datetime,
     business_id: str,
     campaign_id: Optional[str] = None,
+    ad_ids: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, object]]:
     db = db or get_db()
-    match = _match_base(business_id, dt_from, dt_to, campaign_ids=[campaign_id] if campaign_id else None)
+
+    match: Dict[str, object] = {
+        "timestamp": {"$gte": dt_from},
+        "business_id": business_id,
+    }
+    if campaign_id:
+        match["campaign_id"] = campaign_id
+    if ad_ids:
+        match["ad_id"] = {"$in": list(ad_ids)}
+
     pipeline = [
         {"$match": match},
         {
             "$group": {
                 "_id": "$ad_id",
-                "messages": {"$sum": {"$ifNull": ["$messages", 0]}},
-                "spent": {"$sum": {"$ifNull": ["$spent", {"$ifNull": ["$cost", 0]}]}},
-                "reach": {"$sum": {"$ifNull": ["$reach", 0]}},
+                "registrations": {"$sum": 1},
+                "spent": {"$sum": {"$ifNull": ["$spent", 0]}},
                 "impressions": {"$sum": {"$ifNull": ["$impressions", 0]}},
                 "clicks": {"$sum": {"$ifNull": ["$clicks", 0]}},
-                "registrations": {"$sum": 1},
+                "messages": {"$sum": {"$ifNull": ["$messages", 0]}},
+                "reach": {"$sum": {"$ifNull": ["$reach", 0]}},
             }
         },
         {
             "$lookup": {
                 "from": "ads",
-                "let": {"ad_id": "$_id"},
-                "pipeline": [
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$and": [
-                                    {"$eq": ["$ad_id", "$$ad_id"]},
-                                    {"$eq": ["$business_id", business_id]},
-                                ]
-                            }
-                        }
-                    }
-                ],
+                "localField": "_id",
+                "foreignField": "ad_id",
                 "as": "ad",
             }
         },
@@ -285,25 +284,26 @@ def ad_performance(
                 "_id": 0,
                 "ad_id": "$_id",
                 "title": "$ad.title",
+                "status": "$ad.status",
                 "tags": "$ad.tags",
-                "messages": 1,
+                "registrations": 1,
                 "spent": 1,
-                "reach": 1,
                 "impressions": 1,
                 "clicks": 1,
-                "registrations": 1,
+                "messages": 1,
+                "reach": 1,
                 "ctr": {
                     "$cond": [
                         {"$gt": ["$impressions", 0]},
                         {"$divide": ["$clicks", "$impressions"]},
-                        0,
+                        None,
                     ]
                 },
                 "cpr": {
                     "$cond": [
                         {"$gt": ["$registrations", 0]},
                         {"$divide": ["$spent", "$registrations"]},
-                        0,
+                        None,
                     ]
                 },
             }

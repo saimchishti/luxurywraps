@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, time, timezone
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -16,16 +16,10 @@ if str(PAGE_DIR) not in sys.path:
 from services.analytics import ad_performance, campaign_rollup, kpis, timeseries_daily  # noqa: E402
 from services.repositories import list_campaigns  # noqa: E402
 from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_date_filters  # noqa: E402
+from utils.filters import use_start_date  # noqa: E402
 from utils.formatting import format_currency  # noqa: E402
 
-start_date, end_date = use_date_filters()
-
-
-def _date_range_to_datetimes(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    start_dt = datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc)
-    return start_dt, end_dt
+start_dt = use_start_date()
 
 
 def _format_percent(value: float | None) -> str:
@@ -43,8 +37,8 @@ def _require_business() -> tuple[str, str]:
     return business_id, business_name
 
 
-def _render_kpis(business_id: str, dt_from: datetime, dt_to: datetime) -> None:
-    totals = kpis(None, dt_from, dt_to, business_id)
+def _render_kpis(business_id: str, start_dt: datetime) -> None:
+    totals = kpis(None, start_dt, None, business_id)
     columns = st.columns(10)
     columns[0].metric("Registrations", f"{totals['registrations']:,}")
     columns[1].metric("Messages", f"{int(totals['messages']):,}")
@@ -58,9 +52,9 @@ def _render_kpis(business_id: str, dt_from: datetime, dt_to: datetime) -> None:
     columns[9].metric("CPR", format_currency(totals["cpr"]))
 
 
-def _render_timeseries(business_id: str, dt_from: datetime, dt_to: datetime) -> None:
+def _render_timeseries(business_id: str, start_dt: datetime) -> None:
     st.subheader("Daily Trends")
-    data = timeseries_daily(None, dt_from, dt_to, business_id)
+    data = timeseries_daily(None, start_dt, None, business_id)
     if not data:
         st.info("No activity for the selected date range.")
         return
@@ -77,9 +71,9 @@ def _render_timeseries(business_id: str, dt_from: datetime, dt_to: datetime) -> 
     st.line_chart(data=df.set_index("date")[["spent"]], height=250, use_container_width=True)
 
 
-def _render_top_campaigns(business_id: str, dt_from: datetime, dt_to: datetime) -> pd.DataFrame:
+def _render_top_campaigns(business_id: str, start_dt: datetime) -> pd.DataFrame:
     st.subheader("Top Campaigns")
-    data = campaign_rollup(None, dt_from, dt_to, business_id)
+    data = campaign_rollup(None, start_dt, None, business_id)
     if not data:
         st.info("No campaign performance available.")
         return pd.DataFrame()
@@ -111,27 +105,26 @@ def _render_top_campaigns(business_id: str, dt_from: datetime, dt_to: datetime) 
     return df
 
 
-def _render_top_ads(business_id: str, dt_from: datetime, dt_to: datetime) -> None:
+def _render_top_ads(business_id: str, start_dt: datetime) -> None:
     st.subheader("Top Ads")
     campaigns = list_campaigns(
         business_id=business_id,
         page_size=100,
-        dt_from=dt_from,
-        dt_to=dt_to,
     )["items"]
     campaign_lookup = {item["campaign_id"]: item for item in campaigns}
-    selected_campaign = st.selectbox(
-        "Filter by campaign",
-        options=[None] + list(campaign_lookup.keys()),
-        format_func=lambda value: "All campaigns" if value is None else campaign_lookup[value]["name"],
+    selection = st.selectbox(
+        "Campaign",
+        ["All campaigns"] + list(campaign_lookup.keys()),
+        format_func=lambda value: "All campaigns"
+        if value == "All campaigns"
+        else f"{campaign_lookup[value].get('name', value)} ({value})",
     )
+    campaign_id = None if selection == "All campaigns" else selection
 
     data = ad_performance(
-        None,
-        dt_from,
-        dt_to,
-        business_id,
-        campaign_id=selected_campaign,
+        dt_from=start_dt,
+        business_id=business_id,
+        campaign_id=campaign_id,
     )
     if not data:
         st.info("No ad performance data available.")
@@ -165,15 +158,11 @@ def _render_top_ads(business_id: str, dt_from: datetime, dt_to: datetime) -> Non
 
 def main() -> None:
     business_id, business_name = _require_business()
-    st.title(f"Analytics — {business_name}")
-
-
-    dt_from, dt_to = _date_range_to_datetimes(start_date, end_date)
-
-    _render_kpis(business_id, dt_from, dt_to)
-    _render_timeseries(business_id, dt_from, dt_to)
-    _render_top_campaigns(business_id, dt_from, dt_to)
-    _render_top_ads(business_id, dt_from, dt_to)
+    st.title(f"Analytics - {business_name}")
+    _render_kpis(business_id, start_dt)
+    _render_timeseries(business_id, start_dt)
+    _render_top_campaigns(business_id, start_dt)
+    _render_top_ads(business_id, start_dt)
 
 
 if __name__ == "__main__":

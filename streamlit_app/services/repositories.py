@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import bcrypt
@@ -25,6 +26,43 @@ from models.validators import (
 )
 from services.db import get_db
 from utils.constants import CAMPAIGN_STATUSES, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+
+
+def _sanitize(value):
+    # Make every value BSON-safe: only str/int/float/bool/datetime/list/dict/None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if isinstance(value, (str, int, bool, datetime)) or value is None:
+        return value
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, list):
+        return [_sanitize(v) for v in value]
+    if isinstance(value, dict):
+        # keys must be strings without '.' and not starting with '$'
+        clean = {}
+        for k, v in value.items():
+            if k is None:
+                continue
+            ks = str(k).replace(".", "_")
+            if ks.startswith("$"):
+                ks = ks.replace("$", "USD_", 1)
+            clean[ks] = _sanitize(v)
+        return clean
+    # fallback to string
+    return str(value)
+
+
+def _sanitize_doc(doc: dict) -> dict:
+    d = _sanitize(dict(doc))
+    if not isinstance(d, dict):
+        d = {}
+    # standard timestamps
+    d.setdefault("created_at", datetime.utcnow())
+    d["updated_at"] = datetime.utcnow()
+    return d
 
 
 class RepositoryError(RuntimeError):
@@ -118,6 +156,7 @@ def create_ad(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
             "updated_at": timestamp,
         }
     )
+    payload = _sanitize_doc(payload)
     try:
         ads_collection().insert_one(payload)
     except DuplicateKeyError as exc:
@@ -143,12 +182,15 @@ def list_ads(
         conditions.append({"status": status})
     if tags:
         conditions.append({"tags": {"$all": list(tags)}})
-    if dt_from and dt_to:
+    if dt_from:
+        range_filter: Dict[str, Any] = {"$gte": dt_from}
+        if dt_to:
+            range_filter["$lte"] = dt_to
         conditions.append(
             {
                 "$or": [
-                    {"updated_at": {"$gte": dt_from, "$lte": dt_to}},
-                    {"created_at": {"$gte": dt_from, "$lte": dt_to}},
+                    {"updated_at": range_filter},
+                    {"created_at": range_filter},
                 ]
             }
         )
@@ -168,6 +210,9 @@ def update_ad(ad_id: str, patch: Dict[str, Any], business_id: str) -> Dict[str, 
     payload = validate_ad_update(patch)
     if not payload:
         raise PayloadValidationError("Nothing to update.")
+    payload = _sanitize(dict(payload))
+    if not isinstance(payload, dict):
+        payload = {}
     payload["updated_at"] = _now()
     result = ads_collection().find_one_and_update(
         {"ad_id": ad_id, "business_id": scoped_id},
@@ -204,6 +249,7 @@ def create_campaign(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     payload.setdefault("business_type", "wedding_decor")
     timestamp = _now()
     payload.update({"created_at": timestamp, "updated_at": timestamp})
+    payload = _sanitize_doc(payload)
     try:
         campaigns_collection().insert_one(payload)
     except DuplicateKeyError as exc:
@@ -228,12 +274,15 @@ def list_campaigns(
         if status not in CAMPAIGN_STATUSES:
             raise PayloadValidationError(f"Unknown campaign status: {status}")
         conditions.append({"status": status})
-    if dt_from and dt_to:
+    if dt_from:
+        range_filter: Dict[str, Any] = {"$gte": dt_from}
+        if dt_to:
+            range_filter["$lte"] = dt_to
         conditions.append(
             {
                 "$or": [
-                    {"updated_at": {"$gte": dt_from, "$lte": dt_to}},
-                    {"created_at": {"$gte": dt_from, "$lte": dt_to}},
+                    {"updated_at": range_filter},
+                    {"created_at": range_filter},
                 ]
             }
         )
@@ -261,6 +310,9 @@ def update_campaign(campaign_id: str, patch: Dict[str, Any], business_id: str) -
     payload = validate_campaign_update(patch)
     if not payload:
         raise PayloadValidationError("Nothing to update.")
+    payload = _sanitize(dict(payload))
+    if not isinstance(payload, dict):
+        payload = {}
     payload["updated_at"] = _now()
     result = campaigns_collection().find_one_and_update(
         {"campaign_id": campaign_id, "business_id": scoped_id},
@@ -326,6 +378,7 @@ def create_registration(data: Dict[str, Any], business_id: str) -> Dict[str, Any
     if timestamp.tzinfo is None:
         payload["timestamp"] = timestamp.replace(tzinfo=timezone.utc)
     payload.setdefault("created_at", _now())
+    payload = _sanitize_doc(payload)
     try:
         registrations_collection().insert_one(payload)
     except DuplicateKeyError as exc:
@@ -351,8 +404,11 @@ def list_registrations(
         filters["ad_id"] = {"$in": list(ad_ids)}
     if sources:
         filters["source"] = {"$in": list(sources)}
-    if dt_from and dt_to:
-        filters["timestamp"] = {"$gte": dt_from, "$lte": dt_to}
+    if dt_from:
+        ts_filter: Dict[str, Any] = {"$gte": dt_from}
+        if dt_to:
+            ts_filter["$lte"] = dt_to
+        filters["timestamp"] = ts_filter
     page = _ensure_page(page)
     page_size = _ensure_page_size(page_size)
     return _paginate(
@@ -369,6 +425,10 @@ def update_registration(registration_id: str, patch: Dict[str, Any], business_id
     payload = validate_registration_update(patch)
     if not payload:
         raise PayloadValidationError("Nothing to update.")
+    payload = _sanitize(dict(payload))
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["updated_at"] = _now()
     result = registrations_collection().find_one_and_update(
         {"registration_id": registration_id, "business_id": scoped_id},
         {"$set": payload},
