@@ -24,8 +24,43 @@ from models.validators import (
     validate_registration,
     validate_registration_update,
 )
-from services.db import get_db
 from utils.constants import CAMPAIGN_STATUSES, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from services.db import get_db
+
+
+class CampaignValidationError(ValueError):
+    """Raised when campaign payload validation fails."""
+
+
+def _validate_campaign_payload(payload: Dict[str, Any]) -> None:
+    required_fields = ["name", "start_date", "end_date", "status", "business_id"]
+    missing = [field for field in required_fields if payload.get(field) in (None, "", [])]
+    if missing:
+        raise CampaignValidationError(f"Missing required field(s): {', '.join(missing)}")
+
+    start = payload.get("start_date")
+    end = payload.get("end_date")
+    if isinstance(start, datetime):
+        start = start.date()
+    if isinstance(end, datetime):
+        end = end.date()
+    if not isinstance(start, date) or not isinstance(end, date):
+        raise CampaignValidationError("Start date and End date must be valid dates.")
+    if end < start:
+        raise CampaignValidationError("End date must be on or after Start date.")
+
+    allowed_status = {"draft", "active", "paused", "archived"}
+    status = payload.get("status")
+    if status not in allowed_status:
+        raise CampaignValidationError(f"Status must be one of: {', '.join(sorted(allowed_status))}")
+
+
+def _db_or_default(db=None):
+    if db is None:
+        from services.db import get_db
+
+        return get_db()
+    return db
 
 
 def _sanitize(value):
@@ -109,20 +144,36 @@ def _paginate(
 
 # Collections -----------------------------------------------------------------
 
-def businesses_collection() -> Collection:
-    return get_db().businesses
+def businesses_collection(db: Optional[Any] = None) -> Collection:
+    return _db_or_default(db).businesses
 
 
-def ads_collection() -> Collection:
-    return get_db().ads
+def ads_collection(db: Optional[Any] = None) -> Collection:
+    return _db_or_default(db).ads
 
 
-def campaigns_collection() -> Collection:
-    return get_db().campaigns
+def campaigns_collection(db: Optional[Any] = None) -> Collection:
+    database = _db_or_default(db)
+    col = database.campaigns
+    col.create_index(
+        [
+            ("business_id", ASCENDING),
+            ("name", ASCENDING),
+            ("start_date", ASCENDING),
+            ("end_date", ASCENDING),
+        ],
+        unique=True,
+        name="uniq_campaign_per_business_and_dates",
+    )
+    col.create_index(
+        [("business_id", ASCENDING), ("updated_at", DESCENDING)],
+        name="business_updated_idx",
+    )
+    return col
 
 
-def registrations_collection() -> Collection:
-    return get_db().registrations
+def registrations_collection(db: Optional[Any] = None) -> Collection:
+    return _db_or_default(db).registrations
 
 
 def get_business(business_id: str) -> Optional[Dict[str, Any]]:
@@ -239,45 +290,41 @@ def create_campaign(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     return _clean(payload)
 
 
-def list_campaigns(
+def create_or_update_campaign(
+    payload: Dict[str, Any],
+    *,
     business_id: str,
-    q: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    dt_from: Optional[datetime] = None,
-    dt_to: Optional[datetime] = None,
+    db: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    scoped_id = _require_business_id(business_id)
-    conditions: List[Dict[str, Any]] = [{"business_id": scoped_id}]
+    col = campaigns_collection(db)
+    now = datetime.utcnow()
+    body = dict(payload)
+    body["business_id"] = business_id
+    body["updated_at"] = now
+    body.setdefault("created_at", now)
+    _validate_campaign_payload(body)
+    key = {
+        "business_id": business_id,
+        "name": body.get("name"),
+        "start_date": body.get("start_date"),
+        "end_date": body.get("end_date"),
+    }
+    col.update_one(key, {"$set": body}, upsert=True)
+    return key
+
+
+def list_campaigns(
+    db: Optional[Any] = None,
+    business_id: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    col = campaigns_collection(db)
+    filt: Dict[str, Any] = {"business_id": business_id} if business_id else {}
     if q:
-        conditions.append({"name": {"$regex": q, "$options": "i"}})
-    if status:
-        if status not in CAMPAIGN_STATUSES:
-            raise PayloadValidationError(f"Unknown campaign status: {status}")
-        conditions.append({"status": status})
-    if dt_from:
-        range_filter: Dict[str, Any] = {"$gte": dt_from}
-        if dt_to:
-            range_filter["$lte"] = dt_to
-        conditions.append(
-            {
-                "$or": [
-                    {"updated_at": range_filter},
-                    {"created_at": range_filter},
-                ]
-            }
-        )
-    mongo_filter = {"$and": conditions} if conditions else {"business_id": scoped_id}
-    page = _ensure_page(page)
-    page_size = _ensure_page_size(page_size)
-    return _paginate(
-        campaigns_collection(),
-        mongo_filter,
-        page,
-        page_size,
-        [("updated_at", DESCENDING)],
-    )
+        filt["name"] = {"$regex": q, "$options": "i"}
+    cursor = col.find(filt).sort("updated_at", DESCENDING).limit(limit)
+    return [_clean(doc) for doc in cursor]
 
 
 def get_campaign(campaign_id: str, business_id: str) -> Optional[Dict[str, Any]]:
@@ -287,30 +334,74 @@ def get_campaign(campaign_id: str, business_id: str) -> Optional[Dict[str, Any]]
     return _clean(doc) if doc else None
 
 
-def update_campaign(campaign_id: str, patch: Dict[str, Any], business_id: str) -> Dict[str, Any]:
-    scoped_id = _require_business_id(business_id)
-    payload = validate_campaign_update(patch)
-    if not payload:
-        raise PayloadValidationError("Nothing to update.")
-    payload = _sanitize(dict(payload))
-    if not isinstance(payload, dict):
-        payload = {}
-    payload["updated_at"] = datetime.utcnow()
-    result = campaigns_collection().find_one_and_update(
-        {"campaign_id": campaign_id, "business_id": scoped_id},
-        {"$set": payload},
-        return_document=True,
+def update_campaign(
+    campaign_id: str,
+    patch: Dict[str, Any],
+    *,
+    business_id: str,
+    db: Optional[Any] = None,
+) -> int:
+    col = campaigns_collection(db)
+    body = dict(patch)
+    body["updated_at"] = datetime.utcnow()
+    res = col.update_one(
+        {"business_id": business_id, "campaign_id": campaign_id},
+        {"$set": body},
     )
-    if not result:
-        raise RepositoryError("Campaign not found.")
-    return _clean(result)
+    return res.modified_count
 
 
-def delete_campaign(campaign_id: str, business_id: str) -> bool:
-    result = campaigns_collection().delete_one(
-        {"campaign_id": campaign_id, "business_id": _require_business_id(business_id)}
+def delete_campaign(
+    campaign_id: str,
+    *,
+    business_id: str,
+    db: Optional[Any] = None,
+) -> int:
+    col = campaigns_collection(db)
+    return col.delete_one({"business_id": business_id, "campaign_id": campaign_id}).deleted_count
+
+
+def delete_all_campaigns(
+    *,
+    business_id: str,
+    db: Optional[Any] = None,
+) -> int:
+    col = campaigns_collection(db)
+    return col.delete_many({"business_id": business_id}).deleted_count
+
+
+def cleanup_orphans(
+    *,
+    business_id: str,
+    db: Optional[Any] = None,
+) -> Dict[str, int]:
+    database = _db_or_default(db)
+    live_campaigns = {
+        doc["campaign_id"]
+        for doc in database.campaigns.find(
+            {"business_id": business_id}, {"_id": 0, "campaign_id": 1}
+        )
+        if doc.get("campaign_id")
+    }
+    deleted_regs = database.registrations.delete_many(
+        {
+            "business_id": business_id,
+            "campaign_id": {"$nin": list(live_campaigns)},
+        }
+    ).deleted_count
+    used_ad_ids = set(
+        database.registrations.distinct("ad_id", {"business_id": business_id})
     )
-    return result.deleted_count > 0
+    deleted_ads = database.ads.delete_many(
+        {
+            "business_id": business_id,
+            "ad_id": {"$nin": list(used_ad_ids)},
+        }
+    ).deleted_count
+    return {
+        "registrations_deleted": deleted_regs,
+        "ads_deleted": deleted_ads,
+    }
 
 
 def attach_ads(campaign_id: str, ad_ids: Iterable[str], business_id: str) -> Dict[str, Any]:

@@ -320,6 +320,17 @@ def _safe_div(a, b) -> float:
         return 0.0
 
 
+def _campaign_ids_for_business(db, business_id: str) -> List[str]:
+    """Return campaign IDs scoped to a business."""
+    return [
+        doc["campaign_id"]
+        for doc in db.campaigns.find(
+            {"business_id": business_id}, {"_id": 0, "campaign_id": 1}
+        )
+        if doc.get("campaign_id")
+    ]
+
+
 def kpis_full(
     db,
     *,
@@ -422,9 +433,14 @@ def clicks_impressions_by_ad_simple(
     """
     Returns [{ad_id, title, clicks, impressions}] for top ads since dt_from.
     """
+    campaign_ids = _campaign_ids_for_business(db, business_id)
+    if not campaign_ids:
+        return []
     match = {
         "business_id": business_id,
         "timestamp": {"$gte": dt_from, "$lte": dt_to},
+        "campaign_id": {"$in": campaign_ids},
+        "ad_id": {"$ne": None},
     }
     pipeline = [
         {"$match": match},
@@ -448,11 +464,23 @@ def clicks_impressions_by_ad_simple(
             "$project": {
                 "_id": 0,
                 "ad_id": "$_id",
-                "title": {"$ifNull": ["$ad.title", "$_id"]},
+                "title": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": ["$ad.title", None]},
+                                {"$ne": ["$ad.title", ""]},
+                            ]
+                        },
+                        "$ad.title",
+                        {"$ifNull": ["$_id", "(Unlabeled)"]},
+                    ]
+                },
                 "clicks": 1,
                 "impressions": 1,
             }
         },
+        {"$match": {"impressions": {"$gt": 0}}},
         {"$sort": {"impressions": -1}},
         {"$limit": limit},
     ]
@@ -469,9 +497,14 @@ def ad_performance_table_simple(
     """
     Returns rows per ad with core fields for a simple table.
     """
+    campaign_ids = _campaign_ids_for_business(db, business_id)
+    if not campaign_ids:
+        return []
     match = {
         "business_id": business_id,
         "timestamp": {"$gte": dt_from, "$lte": dt_to},
+        "campaign_id": {"$in": campaign_ids},
+        "ad_id": {"$ne": None},
     }
     pipeline = [
         {"$match": match},
@@ -518,13 +551,35 @@ def ad_performance_table_simple(
             "$project": {
                 "_id": 0,
                 "ad_id": "$_id",
-                "ad_name": {"$ifNull": ["$ad.title", "$_id"]},
+                "ad_name": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": ["$ad.title", None]},
+                                {"$ne": ["$ad.title", ""]},
+                            ]
+                        },
+                        "$ad.title",
+                        {"$ifNull": ["$_id", "(Unlabeled)"]},
+                    ]
+                },
                 "spent": 1,
                 "messages": 1,
                 "impressions": 1,
                 "clicks": 1,
                 "reach": 1,
                 "customers": 1,
+            }
+        },
+        {
+            "$match": {
+                "$or": [
+                    {"spent": {"$gt": 0}},
+                    {"messages": {"$gt": 0}},
+                    {"impressions": {"$gt": 0}},
+                    {"clicks": {"$gt": 0}},
+                    {"reach": {"$gt": 0}},
+                ]
             }
         },
         {"$sort": {"spent": -1}},

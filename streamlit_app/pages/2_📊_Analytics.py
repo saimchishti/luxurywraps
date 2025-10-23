@@ -118,8 +118,8 @@ def _render_top_ads(business_id: str, start_dt: datetime) -> None:
     st.subheader("Top Ads")
     campaigns = list_campaigns(
         business_id=business_id,
-        page_size=100,
-    )["items"]
+        limit=100,
+    )
     campaign_lookup = {item["campaign_id"]: item for item in campaigns}
     selection = st.selectbox(
         "Campaign",

@@ -45,8 +45,8 @@ def _require_business() -> tuple[str, str]:
 def _fetch_options(business_id: str, start_dt: datetime) -> tuple[List[dict], List[dict]]:
     campaigns = list_campaigns(
         business_id=business_id,
-        page_size=100,
-    )["items"]
+        limit=100,
+    )
     ads_response = list_ads(
         business_id=business_id,
         page_size=100,
