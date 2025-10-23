@@ -172,27 +172,33 @@ def _render_table(payload: dict, filters: Dict[str, list]) -> None:
         st.info("No registrations for the selected filters yet.")
         return
     df = pd.DataFrame(items)
-    df["timestamp"] = df["timestamp"].apply(format_datetime)
-    df["cost"] = df["cost"].apply(format_currency)
-    df["spent"] = df["spent"].apply(format_currency)
+    if "timestamp" in df.columns:
+        df["timestamp"] = df["timestamp"].apply(format_datetime)
+    if "cost" in df.columns:
+        df["cost"] = df["cost"].apply(format_currency)
+    if "spent" in df.columns:
+        df["spent"] = df["spent"].apply(format_currency)
+    desired = [
+        "registration_id",
+        "timestamp",
+        "campaign_id",
+        "ad_id",
+        "source",
+        "messages",
+        "spent",
+        "reach",
+        "impressions",
+        "clicks",
+        "user_id",
+        "cost",
+        "meta",
+    ]
+    for col in desired:
+        if col not in df.columns:
+            df[col] = None
+    df = df[desired]
     st.dataframe(
-        df[
-            [
-                "registration_id",
-                "campaign_id",
-                "ad_id",
-                "source",
-                "cost",
-                "spent",
-                "messages",
-                "reach",
-                "impressions",
-                "clicks",
-                "timestamp",
-                "user_id",
-                "meta",
-            ]
-        ],
+        df,
         use_container_width=True,
     )
     st.caption(f"Showing {len(df)} of {payload['total']} registrations.")
@@ -221,7 +227,6 @@ def _render_export(filters: Dict[str, list], business_id: str, start_dt: datetim
         data=buffer,
         file_name="registrations.csv",
         mime="text/csv",
-        use_container_width=False,
     )
 
 

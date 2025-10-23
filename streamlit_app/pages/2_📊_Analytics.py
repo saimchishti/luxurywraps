@@ -130,6 +130,15 @@ def _render_top_ads(business_id: str, start_dt: datetime) -> None:
         st.info("No ad performance data available.")
         return
     df = pd.DataFrame(data)
+    if "tags" not in df.columns:
+        df["tags"] = [[] for _ in range(len(df))]
+
+    def _tags_to_str(value):
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(tag).strip() for tag in value if str(tag).strip())
+        return ""
+
+    df["Tags"] = df["tags"].apply(_tags_to_str)
     df["Spent"] = df["spent"].apply(format_currency)
     df["CPR"] = df["cpr"].apply(format_currency)
     df["CTR"] = df["ctr"].apply(_format_percent)
@@ -138,7 +147,6 @@ def _render_top_ads(business_id: str, start_dt: datetime) -> None:
     df["Impressions"] = df["impressions"]
     df["Clicks"] = df["clicks"]
     df["Reach"] = df["reach"]
-    df["Tags"] = df["tags"].apply(lambda tags: ", ".join(tags or []))
     display_columns = [
         "title",
         "Tags",

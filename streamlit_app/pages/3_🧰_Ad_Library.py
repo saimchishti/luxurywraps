@@ -47,23 +47,26 @@ def _render_create_ad(business_id: str) -> None:
         save = st.form_submit_button("Save")
     if save:
         title = (title or "").strip()
+        if not title:
+            st.error("Title is required.")
+            return
+        url = (creative_url or "").strip() or None
         tags = [str(t).strip() for t in (tags_raw.split(",") if tags_raw else []) if str(t).strip()]
         status = status or "active"
         payload = {
             "ad_id": str(uuid4()),
             "title": title,
-            "creative_url": (creative_url or "").strip(),
+            "creative_url": url,
             "status": status,
             "tags": tags,
             "business_id": business_id,
         }
         try:
-            with st.spinner("Saving ad..."):
-                create_ad(payload, business_id=business_id)
-            st.toast("Ad created.")
+            create_ad(payload, business_id=business_id)
+            st.success("Ad saved.")
             do_rerun()
-        except RepositoryError as exc:
-            st.error(f"Unable to create ad: {exc}")
+        except Exception as exc:
+            st.error(f"Could not save ad: {exc}")
 
 
 def _is_recent_ad(doc: dict, threshold: datetime) -> bool:

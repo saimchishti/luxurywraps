@@ -29,37 +29,27 @@ from utils.constants import CAMPAIGN_STATUSES, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 
 
 def _sanitize(value):
-    # Make every value BSON-safe: only str/int/float/bool/datetime/list/dict/None
     if isinstance(value, date) and not isinstance(value, datetime):
         return datetime(value.year, value.month, value.day)
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
-    if isinstance(value, (str, int, bool, datetime)) or value is None:
+    if isinstance(value, (str, int, bool, float, datetime)) or value is None:
         return value
-    if isinstance(value, float):
-        return float(value)
     if isinstance(value, list):
         return [_sanitize(v) for v in value]
     if isinstance(value, dict):
-        # keys must be strings without '.' and not starting with '$'
-        clean = {}
+        out: Dict[str, Any] = {}
         for k, v in value.items():
-            if k is None:
-                continue
             ks = str(k).replace(".", "_")
             if ks.startswith("$"):
-                ks = ks.replace("$", "USD_", 1)
-            clean[ks] = _sanitize(v)
-        return clean
-    # fallback to string
+                ks = "USD_" + ks[1:]
+            out[ks] = _sanitize(v)
+        return out
     return str(value)
 
 
 def _sanitize_doc(doc: dict) -> dict:
     d = _sanitize(dict(doc))
-    if not isinstance(d, dict):
-        d = {}
-    # standard timestamps
     d.setdefault("created_at", datetime.utcnow())
     d["updated_at"] = datetime.utcnow()
     return d
@@ -148,14 +138,7 @@ def create_ad(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     payload_data["business_id"] = scoped_id
     payload = validate_ad(payload_data)
     payload.setdefault("ad_id", _new_id())
-    timestamp = _now()
-    payload.update(
-        {
-            "business_id": scoped_id,
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        }
-    )
+    payload["business_id"] = scoped_id
     payload = _sanitize_doc(payload)
     try:
         ads_collection().insert_one(payload)
@@ -213,7 +196,7 @@ def update_ad(ad_id: str, patch: Dict[str, Any], business_id: str) -> Dict[str, 
     payload = _sanitize(dict(payload))
     if not isinstance(payload, dict):
         payload = {}
-    payload["updated_at"] = _now()
+    payload["updated_at"] = datetime.utcnow()
     result = ads_collection().find_one_and_update(
         {"ad_id": ad_id, "business_id": scoped_id},
         {"$set": payload},
@@ -247,8 +230,7 @@ def create_campaign(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     payload.setdefault("campaign_id", _new_id())
     payload.setdefault("status", "draft")
     payload.setdefault("business_type", "wedding_decor")
-    timestamp = _now()
-    payload.update({"created_at": timestamp, "updated_at": timestamp})
+    payload["business_id"] = scoped_id
     payload = _sanitize_doc(payload)
     try:
         campaigns_collection().insert_one(payload)
@@ -313,7 +295,7 @@ def update_campaign(campaign_id: str, patch: Dict[str, Any], business_id: str) -
     payload = _sanitize(dict(payload))
     if not isinstance(payload, dict):
         payload = {}
-    payload["updated_at"] = _now()
+    payload["updated_at"] = datetime.utcnow()
     result = campaigns_collection().find_one_and_update(
         {"campaign_id": campaign_id, "business_id": scoped_id},
         {"$set": payload},
@@ -343,7 +325,7 @@ def attach_ads(campaign_id: str, ad_ids: Iterable[str], business_id: str) -> Dic
         raise RepositoryError("One or more ads do not belong to this business.")
     result = campaigns_collection().find_one_and_update(
         {"campaign_id": campaign_id, "business_id": scoped_id},
-        {"$addToSet": {"ad_ids": {"$each": ad_ids}}, "$set": {"updated_at": _now()}},
+        {"$addToSet": {"ad_ids": {"$each": ad_ids}}, "$set": {"updated_at": datetime.utcnow()}},
         return_document=True,
     )
     if not result:
@@ -358,7 +340,7 @@ def detach_ads(campaign_id: str, ad_ids: Iterable[str], business_id: str) -> Dic
         raise PayloadValidationError("No ads selected.")
     result = campaigns_collection().find_one_and_update(
         {"campaign_id": campaign_id, "business_id": scoped_id},
-        {"$pull": {"ad_ids": {"$in": ad_ids}}, "$set": {"updated_at": _now()}},
+        {"$pull": {"ad_ids": {"$in": ad_ids}}, "$set": {"updated_at": datetime.utcnow()}},
         return_document=True,
     )
     if not result:
@@ -377,7 +359,7 @@ def create_registration(data: Dict[str, Any], business_id: str) -> Dict[str, Any
     timestamp = payload["timestamp"]
     if timestamp.tzinfo is None:
         payload["timestamp"] = timestamp.replace(tzinfo=timezone.utc)
-    payload.setdefault("created_at", _now())
+    payload["business_id"] = scoped_id
     payload = _sanitize_doc(payload)
     try:
         registrations_collection().insert_one(payload)
@@ -428,7 +410,7 @@ def update_registration(registration_id: str, patch: Dict[str, Any], business_id
     payload = _sanitize(dict(payload))
     if not isinstance(payload, dict):
         payload = {}
-    payload["updated_at"] = _now()
+    payload["updated_at"] = datetime.utcnow()
     result = registrations_collection().find_one_and_update(
         {"registration_id": registration_id, "business_id": scoped_id},
         {"$set": payload},
@@ -446,38 +428,49 @@ def delete_registration(registration_id: str, business_id: str) -> bool:
     return result.deleted_count > 0
 
 
-def export_registrations_csv(filters: Dict[str, Any], business_id: str) -> io.BytesIO:
+def export_registrations_csv(query: Dict[str, Any], *, business_id: str) -> io.BytesIO:
     """Return buffered CSV with filtered registrations."""
-    scoped_filters = _with_business(filters, business_id)
-    cursor = registrations_collection().find(scoped_filters)
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=[
-            "registration_id",
-            "campaign_id",
-            "ad_id",
-            "user_id",
-            "source",
-            "cost",
-            "spent",
-            "messages",
-            "reach",
-            "impressions",
-            "clicks",
-            "timestamp",
-            "meta",
-            "business_id",
-        ],
-    )
+    db = get_db()
+    q = dict(query or {})
+    q["business_id"] = _require_business_id(business_id)
+    docs = list(db.registrations.find(q, {"_id": 0}))
+
+    desired = [
+        "timestamp",
+        "campaign_id",
+        "ad_id",
+        "source",
+        "messages",
+        "spent",
+        "reach",
+        "impressions",
+        "clicks",
+        "user_id",
+        "business_id",
+        "created_at",
+        "updated_at",
+    ]
+
+    def _to_iso(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    rows: List[Dict[str, Any]] = []
+    for doc in docs:
+        row = {}
+        for column in desired:
+            row[column] = _to_iso(doc.get(column))
+        rows.append(row)
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=desired, extrasaction="ignore")
     writer.writeheader()
-    for doc in cursor:
-        doc = _clean(doc)
-        writer.writerow(doc)
-    buffer = io.BytesIO()
-    buffer.write(output.getvalue().encode("utf-8"))
-    buffer.seek(0)
-    return buffer
+    writer.writerows(rows)
+
+    out = io.BytesIO(buffer.getvalue().encode("utf-8"))
+    out.seek(0)
+    return out
 
 
 # Seeder ----------------------------------------------------------------------
