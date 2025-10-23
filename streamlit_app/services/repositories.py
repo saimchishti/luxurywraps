@@ -1,4 +1,4 @@
-"""Repository layer encapsulating database CRUD logic."""
+﻿"""Repository layer encapsulating database CRUD logic."""
 
 from __future__ import annotations
 
@@ -6,14 +6,16 @@ import csv
 import io
 import math
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as _time, timedelta, timezone
+from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import bcrypt
 from pymongo import ASCENDING, DESCENDING
 from pymongo.collection import Collection
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from ulid import new as ulid_new
+from bson import SON
 
 from models.validators import (
     PayloadValidationError,
@@ -24,35 +26,76 @@ from models.validators import (
     validate_registration,
     validate_registration_update,
 )
-from utils.constants import CAMPAIGN_STATUSES, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from utils.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from services.db import get_db
 
 
 class CampaignValidationError(ValueError):
-    """Raised when campaign payload validation fails."""
+    pass
 
 
-def _validate_campaign_payload(payload: Dict[str, Any]) -> None:
-    required_fields = ["name", "start_date", "end_date", "status", "business_id"]
-    missing = [field for field in required_fields if payload.get(field) in (None, "", [])]
+def _validate_campaign_payload(p: Dict[str, Any]) -> None:
+    required = ["name", "start_date", "status", "business_id"]
+    missing = [k for k in required if p.get(k) in (None, "", [])]
     if missing:
         raise CampaignValidationError(f"Missing required field(s): {', '.join(missing)}")
 
-    start = payload.get("start_date")
-    end = payload.get("end_date")
-    if isinstance(start, datetime):
-        start = start.date()
-    if isinstance(end, datetime):
-        end = end.date()
-    if not isinstance(start, date) or not isinstance(end, date):
-        raise CampaignValidationError("Start date and End date must be valid dates.")
-    if end < start:
-        raise CampaignValidationError("End date must be on or after Start date.")
+    sd = p.get("start_date")
+    if not isinstance(sd, (datetime, date)):
+        raise CampaignValidationError("Start date must be a valid date.")
 
-    allowed_status = {"draft", "active", "paused", "archived"}
-    status = payload.get("status")
-    if status not in allowed_status:
+    allowed_status = {"active", "paused"}
+    if p.get("status") not in allowed_status:
         raise CampaignValidationError(f"Status must be one of: {', '.join(sorted(allowed_status))}")
+
+
+def _ensure_index(col: Collection, keys, **kwargs):
+    """
+    Create an index idempotently:
+    - If an index with the same key pattern already exists (any name), do nothing.
+    - If server returns IndexOptionsConflict/IndexKeySpecsConflict, retry without name or ignore.
+    """
+
+    def _keys_to_son(key_spec):
+        if isinstance(key_spec, SON):
+            return SON(key_spec)
+        if isinstance(key_spec, list):
+            return SON(key_spec)
+        if isinstance(key_spec, tuple):
+            return SON([key_spec])
+        if isinstance(key_spec, dict):
+            return SON(key_spec.items())
+        if isinstance(key_spec, str):
+            return SON([(key_spec, ASCENDING)])
+        return SON(key_spec)
+
+    key_son = _keys_to_son(keys)
+
+    try:
+        for ix in col.list_indexes():
+            if SON(ix["key"]) == key_son:
+                return ix.get("name")
+    except Exception:  # pragma: no cover - defensive; listing indexes can fail
+        pass
+
+    try:
+        return col.create_index(keys, **kwargs)
+    except OperationFailure as exc:
+        if getattr(exc, "code", None) in (85, 86):
+            kwargs.pop("name", None)
+            try:
+                return col.create_index(keys, **kwargs)
+            except OperationFailure:
+                return None
+        raise
+
+
+def _as_dt_start(v):
+    if isinstance(v, datetime):
+        return v.replace(hour=0, minute=0, second=0, microsecond=0)
+    if isinstance(v, date):
+        return datetime.combine(v, _time.min)
+    return v
 
 
 def _db_or_default(db=None):
@@ -155,19 +198,23 @@ def ads_collection(db: Optional[Any] = None) -> Collection:
 def campaigns_collection(db: Optional[Any] = None) -> Collection:
     database = _db_or_default(db)
     col = database.campaigns
-    col.create_index(
-        [
-            ("business_id", ASCENDING),
-            ("name", ASCENDING),
-            ("start_date", ASCENDING),
-            ("end_date", ASCENDING),
-        ],
-        unique=True,
-        name="uniq_campaign_per_business_and_dates",
-    )
-    col.create_index(
+    _ensure_index(
+        col,
         [("business_id", ASCENDING), ("updated_at", DESCENDING)],
-        name="business_updated_idx",
+        name="idx_campaigns_updated",
+    )
+    _ensure_index(
+        col,
+        [("business_id", ASCENDING), ("campaign_id", ASCENDING)],
+        unique=True,
+        sparse=True,
+        name="idx_campaigns_business_campaign",
+    )
+    _ensure_index(
+        col,
+        [("business_id", ASCENDING), ("name", ASCENDING), ("start_date", ASCENDING)],
+        unique=True,
+        name="uniq_business_name_start",
     )
     return col
 
@@ -298,33 +345,40 @@ def create_or_update_campaign(
 ) -> Dict[str, Any]:
     col = campaigns_collection(db)
     now = datetime.utcnow()
-    body = dict(payload)
-    body["business_id"] = business_id
-    body["updated_at"] = now
-    body.setdefault("created_at", now)
-    _validate_campaign_payload(body)
-    key = {
-        "business_id": business_id,
-        "name": body.get("name"),
-        "start_date": body.get("start_date"),
-        "end_date": body.get("end_date"),
-    }
-    col.update_one(key, {"$set": body}, upsert=True)
-    return key
+
+    p = dict(payload)
+    cid = p.pop("campaign_id", None)
+    p["business_id"] = business_id
+    p["updated_at"] = now
+    p.setdefault("created_at", now)
+    p["start_date"] = _as_dt_start(p.get("start_date"))
+    p.setdefault("status", "active")
+
+    _validate_campaign_payload(p)
+
+    if cid:
+        col.update_one({"business_id": business_id, "campaign_id": cid}, {"$set": p}, upsert=False)
+        return {"business_id": business_id, "campaign_id": cid}
+
+    col.update_one(
+        {"business_id": business_id, "name": p["name"], "start_date": p["start_date"]},
+        {"$set": p, "$setOnInsert": {"campaign_id": str(uuid4())}},
+        upsert=True,
+    )
+    return {"business_id": business_id, "name": p["name"], "start_date": p["start_date"]}
 
 
 def list_campaigns(
     db: Optional[Any] = None,
-    business_id: Optional[str] = None,
-    q: Optional[str] = None,
+    business_id: str | None = None,
+    q: str | None = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
     col = campaigns_collection(db)
     filt: Dict[str, Any] = {"business_id": business_id} if business_id else {}
     if q:
         filt["name"] = {"$regex": q, "$options": "i"}
-    cursor = col.find(filt).sort("updated_at", DESCENDING).limit(limit)
-    return [_clean(doc) for doc in cursor]
+    return list(col.find(filt).sort("updated_at", -1).limit(limit))
 
 
 def get_campaign(campaign_id: str, business_id: str) -> Optional[Dict[str, Any]]:
@@ -368,6 +422,29 @@ def delete_all_campaigns(
 ) -> int:
     col = campaigns_collection(db)
     return col.delete_many({"business_id": business_id}).deleted_count
+
+
+def backfill_campaign_ids(
+    *,
+    business_id: str,
+    db: Optional[Any] = None,
+) -> int:
+    database = _db_or_default(db)
+    col = database.campaigns
+    to_fix = list(
+        col.find(
+            {
+                "business_id": business_id,
+                "$or": [{"campaign_id": None}, {"campaign_id": {"$exists": False}}],
+            },
+            {"_id": 1},
+        )
+    )
+    count = 0
+    for doc in to_fix:
+        col.update_one({"_id": doc["_id"]}, {"$set": {"campaign_id": str(uuid4())}})
+        count += 1
+    return count
 
 
 def cleanup_orphans(
@@ -694,3 +771,4 @@ def seed_demo_data(days: int = 30, registrations: int = 200) -> Dict[str, int]:
 
 def _new_id() -> str:
     return ulid_new().str
+

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, date as _date
+from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +18,7 @@ from services.repositories import (  # noqa: E402
     delete_all_campaigns,
     delete_campaign,
     detach_ads,
+    backfill_campaign_ids,
     list_ads,
     list_campaigns,
 )
@@ -49,39 +50,25 @@ def _is_recent(doc: Dict[str, Any], threshold: datetime) -> bool:
     return True
 
 
-def _coerce_date(value: Optional[Any]) -> date:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return date.today()
-
-
 def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
     st.header("Manage Campaigns")
 
     items = list_campaigns(db=db, business_id=business_id, limit=1000)
-    required_cols = ["campaign_id", "name", "start_date", "end_date", "status"]
+    REQUIRED = ["campaign_id", "name", "start_date", "status"]
+    df = pd.DataFrame(items) if items else pd.DataFrame(columns=REQUIRED)
+    for column in REQUIRED:
+        if column not in df.columns:
+            df[column] = None
+    if df["campaign_id"].isna().any() and "_id" in df.columns:
+        df["campaign_id"] = df["campaign_id"].fillna(df["_id"].astype(str))
+    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+    df["status"] = df["status"].fillna("active")
 
-    if not items:
-        df = pd.DataFrame(columns=required_cols)
-    else:
-        df = pd.DataFrame(items)
-        for column in required_cols:
-            if column not in df.columns:
-                df[column] = None
-        if df["campaign_id"].isna().any() and "_id" in df.columns:
-            df["campaign_id"] = df["campaign_id"].fillna(df["_id"].astype(str))
-        df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
-        df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce").dt.date
-        df["status"] = df["status"].fillna("active")
-
-    show = df[required_cols].rename(
+    show = df[["campaign_id", "name", "start_date", "status"]].rename(
         columns={
             "campaign_id": "ID",
             "name": "Name",
             "start_date": "Start",
-            "end_date": "End",
             "status": "Status",
         }
     )
@@ -93,11 +80,17 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
     id_to_name = {
         (row["campaign_id"] or ""): (row["name"] or "(unnamed)")
         for _, row in df.iterrows()
-        if pd.notna(row["campaign_id"]) and str(row["campaign_id"]).strip()
+        if pd.notna(row["campaign_id"]) and str(row["campaign_id"]).strip() != ""
     }
-    select_options = ["New campaign"] + [f"{value} - {key}" for key, value in id_to_name.items()]
-    choice = st.selectbox("Select campaign to edit", select_options, index=0, key="campaign_select")
-    selected_id = None if choice == "New campaign" else choice.split(" - ")[-1]
+    choice = st.selectbox(
+        "Select campaign to edit",
+        ["➕ New"] + [f"{value} — {key}" for key, value in id_to_name.items()],
+        index=0,
+    )
+    selected_id = None if choice == "➕ New" else choice.split(" — ")[-1]
+
+    if "camp_form_nonce" not in st.session_state:
+        st.session_state.camp_form_nonce = 0
 
     existing: Dict[str, Any] = {}
     if selected_id:
@@ -107,44 +100,35 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
             existing = {
                 "campaign_id": row.get("campaign_id"),
                 "name": row.get("name") or "",
-                "start_date": row.get("start_date") or date.today(),
-                "end_date": row.get("end_date") or date.today(),
+                "start_date": row.get("start_date") if pd.notna(row.get("start_date")) else _date.today(),
                 "status": row.get("status") or "active",
             }
 
-    if "camp_form_nonce" not in st.session_state:
-        st.session_state.camp_form_nonce = 0
-
     with st.form(f"campaign_form_{st.session_state.camp_form_nonce}", clear_on_submit=True):
         name = st.text_input("Name", value=existing.get("name", ""))
-        start_default = _coerce_date(existing.get("start_date"))
-        end_default = _coerce_date(existing.get("end_date"))
-        start = st.date_input("Start date", value=start_default)
-        end = st.date_input("End date", value=end_default)
-        statuses = ["draft", "active", "paused", "archived"]
+        start_default = existing.get("start_date") or _date.today()
+        status_options = ["active", "paused"]
         current_status = existing.get("status", "active")
-        status_idx = statuses.index(current_status) if current_status in statuses else statuses.index("active")
-        status = st.selectbox("Status", statuses, index=status_idx)
-
+        if current_status not in status_options:
+            current_status = "active"
+        status = st.selectbox("Status", status_options, index=status_options.index(current_status))
+        start = st.date_input("Start date", value=start_default)
         submit = st.form_submit_button("Save campaign")
 
     if submit:
-        errors: List[str] = []
+        errs: List[str] = []
         nm = (name or "").strip()
         if not nm:
-            errors.append("Name is required.")
-        if end < start:
-            errors.append("End date must be on or after Start date.")
+            errs.append("Name is required.")
 
-        if errors:
-            for error in errors:
-                st.error(error)
+        if errs:
+            for e in errs:
+                st.error(e)
         else:
             payload = {
                 "campaign_id": existing.get("campaign_id"),
                 "name": nm,
                 "start_date": start,
-                "end_date": end,
                 "status": status or "active",
             }
             try:
@@ -152,8 +136,8 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
                 st.success("Campaign saved.")
                 st.session_state.camp_form_nonce += 1
                 st.rerun()
-            except Exception as exc:
-                st.error(f"Could not save campaign: {exc}")
+            except Exception as ex:
+                st.error(f"Could not save campaign: {ex}")
 
     if selected_id:
         col1, _ = st.columns([1, 1])
@@ -167,6 +151,11 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
                 st.rerun()
 
     st.subheader("Danger zone")
+    with st.expander("Backfill missing campaign IDs"):
+        if st.button("Backfill now"):
+            fixed = backfill_campaign_ids(business_id=business_id, db=db)
+            st.success(f"Added campaign_id to {fixed} campaign(s).")
+            st.rerun()
     with st.expander("Delete ALL campaigns for this business"):
         st.warning("This will permanently remove every campaign for this business.")
         confirm = st.text_input("Type DELETE to confirm:")
