@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional
 
 from pymongo.database import Database
 
-from services.db import get_db
+from .db import get_db
 
 
 def _match_base(

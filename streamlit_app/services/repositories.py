@@ -17,7 +17,7 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 from ulid import new as ulid_new
 from bson import SON
 
-from models.validators import (
+from streamlit_app.models.validators import (
     PayloadValidationError,
     validate_ad,
     validate_ad_update,
@@ -26,8 +26,8 @@ from models.validators import (
     validate_registration,
     validate_registration_update,
 )
-from utils.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from services.db import get_db
+from streamlit_app.utils.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from .db import get_db
 
 
 class CampaignValidationError(ValueError):
@@ -100,7 +100,7 @@ def _as_dt_start(v):
 
 def _db_or_default(db=None):
     if db is None:
-        from services.db import get_db
+        from .db import get_db
 
         return get_db()
     return db

@@ -8,8 +8,8 @@ from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
-from services.db import get_db  # noqa: E402
-from services.repositories import (  # noqa: E402
+from streamlit_app.services.db import get_db  # noqa: E402
+from streamlit_app.services.repositories import (  # noqa: E402
     RepositoryError,
     attach_ads,
     campaigns_using_ad,
@@ -22,9 +22,9 @@ from services.repositories import (  # noqa: E402
     list_ads,
     list_campaigns,
 )
-from utils.auth import do_rerun  # noqa: E402
-from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_start_date  # noqa: E402
+from streamlit_app.utils.auth import do_rerun  # noqa: E402
+from streamlit_app.utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
+from streamlit_app.utils.filters import use_start_date  # noqa: E402
 
 start_dt = use_start_date()
 

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import streamlit as st
 
-from services.repositories import (  # noqa: E402
+from streamlit_app.services.repositories import (  # noqa: E402
     RepositoryError,
     campaigns_using_ad,
     create_ad,
@@ -15,9 +15,9 @@ from services.repositories import (  # noqa: E402
     list_ads,
     update_ad,
 )
-from utils.auth import do_rerun  # noqa: E402
-from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_start_date  # noqa: E402
+from streamlit_app.utils.auth import do_rerun  # noqa: E402
+from streamlit_app.utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
+from streamlit_app.utils.filters import use_start_date  # noqa: E402
 
 start_dt = use_start_date()
 

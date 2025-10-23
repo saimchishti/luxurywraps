@@ -8,7 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from services.analytics import (  # noqa: E402
+from streamlit_app.services.analytics import (  # noqa: E402
     ad_performance,
     ad_performance_table_simple,
     campaign_rollup,
@@ -17,12 +17,12 @@ from services.analytics import (  # noqa: E402
     kpis_full,
     timeseries_daily,
 )
-from services.db import get_db  # noqa: E402
-from services.repositories import list_campaigns  # noqa: E402
-from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
-from utils.filters import use_start_date  # noqa: E402
-from utils.filters_analytics import use_date_range_for_analytics  # noqa: E402
-from utils.formatting import format_currency  # noqa: E402
+from streamlit_app.services.db import get_db  # noqa: E402
+from streamlit_app.services.repositories import list_campaigns  # noqa: E402
+from streamlit_app.utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
+from streamlit_app.utils.filters import use_start_date  # noqa: E402
+from streamlit_app.utils.filters_analytics import use_date_range_for_analytics  # noqa: E402
+from streamlit_app.utils.formatting import format_currency  # noqa: E402
 
 
 def _format_percent(value: float | None) -> str:

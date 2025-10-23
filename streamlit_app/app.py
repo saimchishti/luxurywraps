@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-# --- path bootstrap so absolute imports like `from services...` work on Streamlit Cloud
+# --- path bootstrap so absolute imports like `from streamlit_app.services...` work on Streamlit Cloud
 import os
 import sys
 

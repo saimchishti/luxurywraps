@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationInfo, field_validator, model_validator
 
-from utils.constants import AD_STATUSES, CAMPAIGN_STATUSES
+from streamlit_app.utils.constants import AD_STATUSES, CAMPAIGN_STATUSES
 
 
 class TargetingModel(BaseModel):
