@@ -6,6 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -13,13 +14,21 @@ PAGE_DIR = Path(__file__).resolve().parents[1]
 if str(PAGE_DIR) not in sys.path:
     sys.path.append(str(PAGE_DIR))
 
-from services.analytics import ad_performance, campaign_rollup, kpis, timeseries_daily  # noqa: E402
+from services.analytics import (  # noqa: E402
+    ad_performance,
+    ad_performance_table_simple,
+    campaign_rollup,
+    clicks_impressions_by_ad_simple,
+    kpis,
+    kpis_full,
+    timeseries_daily,
+)
+from services.db import get_db  # noqa: E402
 from services.repositories import list_campaigns  # noqa: E402
 from utils.constants import BUSINESS_ID_SESSION_KEY, BUSINESS_NAME_SESSION_KEY  # noqa: E402
 from utils.filters import use_start_date  # noqa: E402
+from utils.filters_analytics import use_date_range_for_analytics  # noqa: E402
 from utils.formatting import format_currency  # noqa: E402
-
-start_dt = use_start_date()
 
 
 def _format_percent(value: float | None) -> str:
@@ -166,10 +175,137 @@ def _render_top_ads(business_id: str, start_dt: datetime) -> None:
 
 def main() -> None:
     business_id, business_name = _require_business()
+    db = get_db()
+    start_dt = use_start_date()
+    dt_from, dt_to = use_date_range_for_analytics()
     st.title(f"Analytics - {business_name}")
+    totals = kpis_full(db, dt_from=dt_from, dt_to=dt_to, business_id=business_id)
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1.metric("Total Ad Spend", f"${totals['spent']:,.2f}")
+    r1c2.metric("Customer Acquisition Cost", f"${totals['cac']:,.2f}")
+    r1c3.metric("Total Messages", f"{int(totals['messages']):,}")
+    r1c4.metric("Cost per Message", f"${totals['cost_per_msg']:,.2f}")
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    r2c1.metric("Total Customers", f"{int(totals['customers']):,}")
+    r2c2.metric("Total Clicks", f"{int(totals['clicks']):,}")
+    r2c3.metric("Total Impressions", f"{int(totals['impressions']):,}")
+    r2c4.metric("CTR", f"{totals['ctr_pct']:.2f}%")
+    r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+    r3c1.metric("Conversion Rate", f"{totals['conv_pct']:.2f}%")
+    r3c2.metric("Frequency", f"{totals['frequency']:.2f}")
+    r3c3.metric("Reach", f"{int(totals['reach']):,}")
+    r3c4.metric("Engagement Rate", f"{totals['engagement_pct']:.2f}%")
     _render_kpis(business_id, start_dt)
     _render_timeseries(business_id, start_dt)
     _render_top_campaigns(business_id, start_dt)
+
+    # ---- Clicks vs Impressions (Top 10 Ads) ----
+    st.subheader("Clicks vs Impressions")
+    top_ads = clicks_impressions_by_ad_simple(
+        db,
+        dt_from=dt_from,
+        dt_to=dt_to,
+        business_id=business_id,
+        limit=10,
+    )
+    df_bar = pd.DataFrame(top_ads)
+    if not df_bar.empty:
+        long = df_bar.melt(
+            id_vars=["title"],
+            value_vars=["clicks", "impressions"],
+            var_name="metric",
+            value_name="value",
+        )
+        chart = (
+            alt.Chart(long)
+            .mark_bar()
+            .encode(
+                x=alt.X("title:N", sort="-y", title="Ad"),
+                y=alt.Y("value:Q", title="Count"),
+                color=alt.Color("metric:N", title=""),
+                tooltip=["title", "metric", "value"],
+            )
+        ).properties(height=360).interactive()
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info("No data to display for the selected start date.")
+
+    st.divider()
+
+    # ---- Ad Performance Table ----
+    st.subheader("Ad Performance")
+    rows = ad_performance_table_simple(
+        db,
+        dt_from=dt_from,
+        dt_to=dt_to,
+        business_id=business_id,
+    )
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["CTR %"] = (
+            (df["clicks"] / df["impressions"])
+            .fillna(0)
+            .replace([float("inf"), -float("inf")], 0)
+            * 100
+        )
+        df["CAC"] = (
+            (df["spent"] / df["customers"])
+            .replace([float("inf"), -float("inf")], 0)
+            .fillna(0)
+        )
+        df["Cost/Msg"] = (
+            (df["spent"] / df["messages"])
+            .replace([float("inf"), -float("inf")], 0)
+            .fillna(0)
+        )
+        df["Conv %"] = (
+            (df["customers"] / df["messages"])
+            .replace([float("inf"), -float("inf")], 0)
+            .fillna(0)
+            * 100
+        )
+        display = df[
+            [
+                "ad_name",
+                "spent",
+                "messages",
+                "customers",
+                "clicks",
+                "impressions",
+                "CTR %",
+                "Conv %",
+                "Cost/Msg",
+                "CAC",
+                "reach",
+            ]
+        ].rename(
+            columns={
+                "ad_name": "Ad Name",
+                "spent": "Spend",
+                "messages": "Messages",
+                "customers": "Customers",
+                "clicks": "Clicks",
+                "impressions": "Impressions",
+                "reach": "Reach",
+            }
+        )
+        st.dataframe(
+            display.style.format(
+                {
+                    "Spend": "${:,.2f}",
+                    "Cost/Msg": "${:,.2f}",
+                    "CAC": "${:,.2f}",
+                    "CTR %": "{:,.2f}",
+                    "Conv %": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("No ad performance yet for the selected start date.")
+
+    st.divider()
+
     _render_top_ads(business_id, start_dt)
 
 

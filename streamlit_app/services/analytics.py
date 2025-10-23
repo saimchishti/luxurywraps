@@ -311,3 +311,222 @@ def ad_performance(
         {"$sort": {"registrations": -1}},
     ]
     return list(db.registrations.aggregate(pipeline))
+
+
+def _safe_div(a, b) -> float:
+    try:
+        return (float(a) / float(b)) if b else 0.0
+    except Exception:
+        return 0.0
+
+
+def kpis_full(
+    db,
+    *,
+    dt_from: datetime,
+    dt_to: datetime,
+    business_id: str,
+) -> Dict[str, float]:
+    match = {
+        "business_id": business_id,
+        "timestamp": {"$gte": dt_from, "$lte": dt_to},
+    }
+    pipe = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": None,
+                "messages": {"$sum": {"$ifNull": ["$messages", 0]}},
+                "spent": {"$sum": {"$ifNull": ["$spent", 0]}},
+                "reach": {"$sum": {"$ifNull": ["$reach", 0]}},
+                "impressions": {"$sum": {"$ifNull": ["$impressions", 0]}},
+                "clicks": {"$sum": {"$ifNull": ["$clicks", 0]}},
+                "customers_set": {"$addToSet": "$user_id"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "messages": 1,
+                "spent": 1,
+                "reach": 1,
+                "impressions": 1,
+                "clicks": 1,
+                "customers": {
+                    "$size": {
+                        "$filter": {
+                            "input": "$customers_set",
+                            "as": "u",
+                            "cond": {"$ne": ["$$u", None]},
+                        }
+                    }
+                },
+            }
+        },
+    ]
+    agg = list(db.registrations.aggregate(pipe))
+    if not agg:
+        return {
+            k: 0
+            for k in [
+                "messages",
+                "spent",
+                "reach",
+                "impressions",
+                "clicks",
+                "customers",
+                "ctr_pct",
+                "conv_pct",
+                "frequency",
+                "engagement_pct",
+                "cpm",
+                "cpc",
+                "cost_per_msg",
+                "cac",
+            ]
+        }
+
+    a = agg[0]
+    messages = a["messages"]
+    spent = a["spent"]
+    reach = a["reach"]
+    impr = a["impressions"]
+    clicks = a["clicks"]
+    customers = a["customers"]
+
+    return {
+        "messages": messages,
+        "spent": spent,
+        "reach": reach,
+        "impressions": impr,
+        "clicks": clicks,
+        "customers": customers,
+        "ctr_pct": _safe_div(clicks, impr) * 100.0,
+        "conv_pct": _safe_div(customers, messages) * 100.0,
+        "frequency": _safe_div(impr, reach),
+        "engagement_pct": _safe_div(clicks, impr) * 100.0,
+        "cpm": _safe_div(spent, (impr / 1000.0) if impr else 0.0),
+        "cpc": _safe_div(spent, clicks),
+        "cost_per_msg": _safe_div(spent, messages),
+        "cac": _safe_div(spent, customers),
+    }
+
+def clicks_impressions_by_ad_simple(
+    db,
+    *,
+    dt_from: datetime,
+    dt_to: datetime,
+    business_id: str,
+    limit: int = 10,
+):
+    """
+    Returns [{ad_id, title, clicks, impressions}] for top ads since dt_from.
+    """
+    match = {
+        "business_id": business_id,
+        "timestamp": {"$gte": dt_from, "$lte": dt_to},
+    }
+    pipeline = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": "$ad_id",
+                "impressions": {"$sum": {"$ifNull": ["$impressions", 0]}},
+                "clicks": {"$sum": {"$ifNull": ["$clicks", 0]}},
+            }
+        },
+        {
+            "$lookup": {
+                "from": "ads",
+                "localField": "_id",
+                "foreignField": "ad_id",
+                "as": "ad",
+            }
+        },
+        {"$unwind": {"path": "$ad", "preserveNullAndEmptyArrays": True}},
+        {
+            "$project": {
+                "_id": 0,
+                "ad_id": "$_id",
+                "title": {"$ifNull": ["$ad.title", "$_id"]},
+                "clicks": 1,
+                "impressions": 1,
+            }
+        },
+        {"$sort": {"impressions": -1}},
+        {"$limit": limit},
+    ]
+    return list(db.registrations.aggregate(pipeline))
+
+
+def ad_performance_table_simple(
+    db,
+    *,
+    dt_from: datetime,
+    dt_to: datetime,
+    business_id: str,
+):
+    """
+    Returns rows per ad with core fields for a simple table.
+    """
+    match = {
+        "business_id": business_id,
+        "timestamp": {"$gte": dt_from, "$lte": dt_to},
+    }
+    pipeline = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": "$ad_id",
+                "spent": {"$sum": {"$ifNull": ["$spent", 0]}},
+                "messages": {"$sum": {"$ifNull": ["$messages", 0]}},
+                "impressions": {"$sum": {"$ifNull": ["$impressions", 0]}},
+                "clicks": {"$sum": {"$ifNull": ["$clicks", 0]}},
+                "reach": {"$sum": {"$ifNull": ["$reach", 0]}},
+                "customers_set": {"$addToSet": "$user_id"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 1,
+                "spent": 1,
+                "messages": 1,
+                "impressions": 1,
+                "clicks": 1,
+                "reach": 1,
+                "customers": {
+                    "$size": {
+                        "$filter": {
+                            "input": "$customers_set",
+                            "as": "u",
+                            "cond": {"$ne": ["$$u", None]},
+                        }
+                    }
+                },
+            }
+        },
+        {
+            "$lookup": {
+                "from": "ads",
+                "localField": "_id",
+                "foreignField": "ad_id",
+                "as": "ad",
+            }
+        },
+        {"$unwind": {"path": "$ad", "preserveNullAndEmptyArrays": True}},
+        {
+            "$project": {
+                "_id": 0,
+                "ad_id": "$_id",
+                "ad_name": {"$ifNull": ["$ad.title", "$_id"]},
+                "spent": 1,
+                "messages": 1,
+                "impressions": 1,
+                "clicks": 1,
+                "reach": 1,
+                "customers": 1,
+            }
+        },
+        {"$sort": {"spent": -1}},
+    ]
+    return list(db.registrations.aggregate(pipeline))
