@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
-
-PAGE_DIR = Path(__file__).resolve().parents[1]
-if str(PAGE_DIR) not in sys.path:
-    sys.path.append(str(PAGE_DIR))
 
 from services.analytics import (  # noqa: E402
     ad_performance,

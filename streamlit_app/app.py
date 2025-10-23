@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+# --- path bootstrap so absolute imports like `from services...` work on Streamlit Cloud
+import os
 import sys
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+# ---
+
 from pathlib import Path
 
 import streamlit as st

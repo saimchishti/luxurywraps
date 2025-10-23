@@ -1,5 +1,5 @@
 streamlit>=1.35
-pymongo>=4.7
+pymongo[srv]>=4.7
 python-dotenv>=1.0
 pydantic>=2.6
 ulid-py>=1.1
@@ -9,3 +9,4 @@ plotly>=5.22
 pyarrow>=16.0
 pytz>=2024.1
 bcrypt>=4.1
+altair>=5.3

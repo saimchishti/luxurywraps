@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import date, datetime, time, timezone
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-
-PAGE_DIR = Path(__file__).resolve().parents[1]
-if str(PAGE_DIR) not in sys.path:
-    sys.path.append(str(PAGE_DIR))
 
 from services.repositories import (  # noqa: E402
     RepositoryError,

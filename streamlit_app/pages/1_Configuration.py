@@ -1,26 +1,20 @@
-"""Campaign configuration page."""
+﻿"""Campaign configuration page."""
 
 from __future__ import annotations
 
-import sys
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-
-PAGE_DIR = Path(__file__).resolve().parents[1]
-if str(PAGE_DIR) not in sys.path:
-    sys.path.append(str(PAGE_DIR))
 
 from services.db import get_db  # noqa: E402
 from services.repositories import (  # noqa: E402
     RepositoryError,
     attach_ads,
     campaigns_using_ad,
-    create_or_update_campaign,
     cleanup_orphans,
+    create_or_update_campaign,
     delete_all_campaigns,
     delete_campaign,
     detach_ads,
@@ -67,26 +61,22 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
     st.header("Manage Campaigns")
 
     items = list_campaigns(db=db, business_id=business_id, limit=1000)
-
-    import pandas as pd  # noqa: F401
-    from datetime import date as _date
-
-    REQUIRED_COLS = ["campaign_id", "name", "start_date", "end_date", "status"]
+    required_cols = ["campaign_id", "name", "start_date", "end_date", "status"]
 
     if not items:
-        df = pd.DataFrame(columns=REQUIRED_COLS)
+        df = pd.DataFrame(columns=required_cols)
     else:
         df = pd.DataFrame(items)
-        for col in REQUIRED_COLS:
-            if col not in df.columns:
-                df[col] = None
+        for column in required_cols:
+            if column not in df.columns:
+                df[column] = None
         if df["campaign_id"].isna().any() and "_id" in df.columns:
             df["campaign_id"] = df["campaign_id"].fillna(df["_id"].astype(str))
         df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
         df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce").dt.date
         df["status"] = df["status"].fillna("active")
 
-    show = df[REQUIRED_COLS].rename(
+    show = df[required_cols].rename(
         columns={
             "campaign_id": "ID",
             "name": "Name",
@@ -98,18 +88,16 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
     st.dataframe(show, use_container_width=True, hide_index=True)
 
     st.divider()
-
     st.subheader("Create / Edit Campaign")
 
     id_to_name = {
         (row["campaign_id"] or ""): (row["name"] or "(unnamed)")
         for _, row in df.iterrows()
-        if pd.notna(row["campaign_id"]) and str(row["campaign_id"]).strip() != ""
+        if pd.notna(row["campaign_id"]) and str(row["campaign_id"]).strip()
     }
-    select_opts = ["➕ New campaign"] + [f"{v} — {k}" for k, v in id_to_name.items()]
-    choice = st.selectbox("Select campaign to edit", select_opts, index=0, key="campaign_select")
-
-    selected_id = None if choice == "➕ New campaign" else choice.split(" — ")[-1]
+    select_options = ["New campaign"] + [f"{value} - {key}" for key, value in id_to_name.items()]
+    choice = st.selectbox("Select campaign to edit", select_options, index=0, key="campaign_select")
+    selected_id = None if choice == "New campaign" else choice.split(" - ")[-1]
 
     existing: Dict[str, Any] = {}
     if selected_id:
@@ -119,8 +107,8 @@ def _render_manage_campaigns(db, business_id: str) -> List[Dict[str, Any]]:
             existing = {
                 "campaign_id": row.get("campaign_id"),
                 "name": row.get("name") or "",
-                "start_date": row.get("start_date") or _date.today(),
-                "end_date": row.get("end_date") or _date.today(),
+                "start_date": row.get("start_date") or date.today(),
+                "end_date": row.get("end_date") or date.today(),
                 "status": row.get("status") or "active",
             }
 
