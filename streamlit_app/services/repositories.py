@@ -209,11 +209,8 @@ def campaigns_collection(db: Optional[Any] = None) -> Collection:
 def registrations_collection(db: Optional[Any] = None) -> Collection:
     database = _db_or_default(db)
     col = database.registrations
-    _ensure_index(
-        col,
-        [("business_id", ASCENDING), ("timestamp", DESCENDING)],
-        name="idx_regs_biz_time",
-    )
+    # idempotent index creation (avoid OperationFailure 85 on Cloud)
+    _ensure_index(col, [("business_id", ASCENDING), ("timestamp", DESCENDING)], name="idx_regs_biz_time")
     _ensure_index(
         col,
         [("business_id", ASCENDING), ("registration_id", ASCENDING)],
@@ -582,41 +579,58 @@ def list_registrations(
     )
 
 
-def _campaign_name_map(db, business_id: str) -> Dict[str, str]:
-    """Map campaign_id -> campaign name for a business."""
+def _campaign_name_map(db, business_id: str) -> dict:
     return {
         c.get("campaign_id"): (c.get("name") or "(unnamed)")
-        for c in db.campaigns.find({"business_id": business_id}, {"campaign_id": 1, "name": 1, "_id": 0})
+        for c in db.campaigns.find(
+            {"business_id": business_id}, {"campaign_id": 1, "name": 1, "_id": 0}
+        )
         if c.get("campaign_id")
     }
 
 
 def list_registrations_with_names(
-    *, business_id: str, query: Optional[dict] = None, skip: int = 0, limit: int = 50, sort: Optional[list] = None, db=None
-) -> List[dict]:
-    """Return registrations and attach campaign_name."""
+    *,
+    business_id: str,
+    query: Optional[dict] = None,
+    skip: int = 0,
+    limit: int = 50,
+    sort: Optional[list] = None,
+    db: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     col = registrations_collection(db)
-    q = {"business_id": business_id}
+    q = {"business_id": _require_business_id(business_id)}
     if query:
-        q.update(query)
-    sort = sort or [("timestamp", -1)]
-    docs = list(col.find(q).sort(sort).skip(skip).limit(limit))
+        q.update({k: v for k, v in (query or {}).items() if v is not None})
+    sort = sort or [("timestamp", DESCENDING)]
+    docs = list(col.find(q, {"_id": 0}).sort(sort).skip(skip).limit(limit))
     cmap = _campaign_name_map(_db_or_default(db), business_id)
     for d in docs:
-        cid = d.get("campaign_id")
-        d["campaign_name"] = cmap.get(cid, "(unknown)")
+        d["campaign_name"] = cmap.get(d.get("campaign_id"), "(unknown)")
     return docs
 
 
-def read_registration(*, business_id: str, registration_id: str, db=None) -> dict | None:
-    return registrations_collection(db).find_one(
-        {"business_id": business_id, "registration_id": registration_id}
+def read_registration(
+    *, business_id: str, registration_id: str, db: Optional[Any] = None
+) -> Optional[Dict[str, Any]]:
+    doc = registrations_collection(db).find_one(
+        {
+            "business_id": _require_business_id(business_id),
+            "registration_id": registration_id,
+        },
+        {"_id": 0},
     )
+    return _clean(doc) if doc else None
 
 
-def update_registration(*, business_id: str, registration_id: str, patch: dict, db=None) -> int:
-    """Patch safe fields. Converts types where reasonable."""
-    allowed_keys = {
+def update_registration(
+    *,
+    business_id: str,
+    registration_id: str,
+    patch: Dict[str, Any],
+    db: Optional[Any] = None,
+) -> int:
+    allowed = {
         "campaign_id",
         "ad_id",
         "source",
@@ -629,8 +643,7 @@ def update_registration(*, business_id: str, registration_id: str, patch: dict, 
         "cost",
         "timestamp",
     }
-    data = {k: v for k, v in patch.items() if k in allowed_keys}
-    # numeric coercion
+    data = {k: v for k, v in (patch or {}).items() if k in allowed}
     for k in ("messages", "reach", "impressions", "clicks", "user_id"):
         if k in data and data[k] not in (None, ""):
             try:
@@ -643,7 +656,6 @@ def update_registration(*, business_id: str, registration_id: str, patch: dict, 
                 data[k] = float(data[k])
             except Exception:
                 pass
-    # timestamp -> datetime
     if "timestamp" in data and isinstance(data["timestamp"], str):
         try:
             data["timestamp"] = datetime.fromisoformat(data["timestamp"])
@@ -652,15 +664,23 @@ def update_registration(*, business_id: str, registration_id: str, patch: dict, 
 
     data["updated_at"] = datetime.utcnow()
     res = registrations_collection(db).update_one(
-        {"business_id": business_id, "registration_id": registration_id},
+        {
+            "business_id": _require_business_id(business_id),
+            "registration_id": registration_id,
+        },
         {"$set": data},
     )
     return res.modified_count
 
 
-def delete_registration(*, business_id: str, registration_id: str, db=None) -> int:
+def delete_registration(
+    *, business_id: str, registration_id: str, db: Optional[Any] = None
+) -> int:
     return registrations_collection(db).delete_one(
-        {"business_id": business_id, "registration_id": registration_id}
+        {
+            "business_id": _require_business_id(business_id),
+            "registration_id": registration_id,
+        }
     ).deleted_count
 
 

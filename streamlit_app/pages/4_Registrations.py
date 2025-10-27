@@ -9,14 +9,16 @@ from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
-# Repository imports (single source of truth)
 from streamlit_app.services.repositories import (
     RepositoryError,
-    create_registration,
-    export_registrations_csv,
+    # ads/campaigns/list/export/create
     list_ads,
     list_campaigns,
     list_registrations,
+    create_registration,
+    export_registrations_csv,
+    # registrations edit helpers
+    list_registrations_with_names,
     read_registration,
     update_registration,
     delete_registration,
