@@ -1,5 +1,4 @@
 ﻿"""Repository layer encapsulating database CRUD logic."""
-
 from __future__ import annotations
 
 import csv
@@ -7,15 +6,15 @@ import io
 import math
 import random
 from datetime import date, datetime, time as _time, timedelta, timezone
-from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
 import bcrypt
+from bson import SON
 from pymongo import ASCENDING, DESCENDING
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError, OperationFailure
 from ulid import new as ulid_new
-from bson import SON
 
 from streamlit_app.models.validators import (
     PayloadValidationError,
@@ -30,23 +29,12 @@ from streamlit_app.utils.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from .db import get_db
 
 
+# -----------------------------------------------------------------------------
+# Errors / helpers
+# -----------------------------------------------------------------------------
+
 class CampaignValidationError(ValueError):
     pass
-
-
-def _validate_campaign_payload(p: Dict[str, Any]) -> None:
-    required = ["name", "start_date", "status", "business_id"]
-    missing = [k for k in required if p.get(k) in (None, "", [])]
-    if missing:
-        raise CampaignValidationError(f"Missing required field(s): {', '.join(missing)}")
-
-    sd = p.get("start_date")
-    if not isinstance(sd, (datetime, date)):
-        raise CampaignValidationError("Start date must be a valid date.")
-
-    allowed_status = {"active", "paused"}
-    if p.get("status") not in allowed_status:
-        raise CampaignValidationError(f"Status must be one of: {', '.join(sorted(allowed_status))}")
 
 
 def _ensure_index(col: Collection, keys, **kwargs):
@@ -55,7 +43,6 @@ def _ensure_index(col: Collection, keys, **kwargs):
     - If an index with the same key pattern already exists (any name), do nothing.
     - If server returns IndexOptionsConflict/IndexKeySpecsConflict, retry without name or ignore.
     """
-
     def _keys_to_son(key_spec):
         if isinstance(key_spec, SON):
             return SON(key_spec)
@@ -75,7 +62,7 @@ def _ensure_index(col: Collection, keys, **kwargs):
         for ix in col.list_indexes():
             if SON(ix["key"]) == key_son:
                 return ix.get("name")
-    except Exception:  # pragma: no cover - defensive; listing indexes can fail
+    except Exception:  # defensive
         pass
 
     try:
@@ -100,8 +87,6 @@ def _as_dt_start(v):
 
 def _db_or_default(db=None):
     if db is None:
-        from .db import get_db
-
         return get_db()
     return db
 
@@ -185,7 +170,9 @@ def _paginate(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-# Collections -----------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Collections
+# -----------------------------------------------------------------------------
 
 def businesses_collection(db: Optional[Any] = None) -> Collection:
     return _db_or_default(db).businesses
@@ -220,15 +207,35 @@ def campaigns_collection(db: Optional[Any] = None) -> Collection:
 
 
 def registrations_collection(db: Optional[Any] = None) -> Collection:
-    return _db_or_default(db).registrations
+    database = _db_or_default(db)
+    col = database.registrations
+    _ensure_index(
+        col,
+        [("business_id", ASCENDING), ("timestamp", DESCENDING)],
+        name="idx_regs_biz_time",
+    )
+    _ensure_index(
+        col,
+        [("business_id", ASCENDING), ("registration_id", ASCENDING)],
+        unique=True,
+        sparse=True,
+        name="idx_regs_biz_regid",
+    )
+    return col
 
+
+# -----------------------------------------------------------------------------
+# Businesses
+# -----------------------------------------------------------------------------
 
 def get_business(business_id: str) -> Optional[Dict[str, Any]]:
     doc = businesses_collection().find_one({"business_id": business_id})
     return _clean(doc) if doc else None
 
 
-# Ads CRUD --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Ads CRUD
+# -----------------------------------------------------------------------------
 
 def create_ad(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     scoped_id = _require_business_id(business_id)
@@ -268,12 +275,7 @@ def list_ads(
         if dt_to:
             range_filter["$lte"] = dt_to
         conditions.append(
-            {
-                "$or": [
-                    {"updated_at": range_filter},
-                    {"created_at": range_filter},
-                ]
-            }
+            {"$or": [{"updated_at": range_filter}, {"created_at": range_filter}]}
         )
     mongo_filter: Dict[str, Any] = {"$and": conditions} if conditions else {"business_id": scoped_id}
     page = _ensure_page(page)
@@ -298,7 +300,7 @@ def update_ad(ad_id: str, patch: Dict[str, Any], business_id: str) -> Dict[str, 
     result = ads_collection().find_one_and_update(
         {"ad_id": ad_id, "business_id": scoped_id},
         {"$set": payload},
-        return_document=True,
+        return_document=True,  # (pymongo ReturnDocument.AFTER in stricter versions)
     )
     if not result:
         raise RepositoryError("Ad not found.")
@@ -318,7 +320,24 @@ def campaigns_using_ad(ad_id: str, business_id: str) -> List[Dict[str, Any]]:
     return list(cursor)
 
 
-# Campaigns CRUD --------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Campaigns CRUD
+# -----------------------------------------------------------------------------
+
+def _validate_campaign_payload(p: Dict[str, Any]) -> None:
+    required = ["name", "start_date", "status", "business_id"]
+    missing = [k for k in required if p.get(k) in (None, "", [])]
+    if missing:
+        raise CampaignValidationError(f"Missing required field(s): {', '.join(missing)}")
+
+    sd = p.get("start_date")
+    if not isinstance(sd, (datetime, date)):
+        raise CampaignValidationError("Start date must be a valid date.")
+
+    allowed_status = {"active", "paused", "draft"}
+    if p.get("status") not in allowed_status:
+        raise CampaignValidationError(f"Status must be one of: {', '.join(sorted(allowed_status))}")
+
 
 def create_campaign(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     scoped_id = _require_business_id(business_id)
@@ -461,24 +480,15 @@ def cleanup_orphans(
         if doc.get("campaign_id")
     }
     deleted_regs = database.registrations.delete_many(
-        {
-            "business_id": business_id,
-            "campaign_id": {"$nin": list(live_campaigns)},
-        }
+        {"business_id": business_id, "campaign_id": {"$nin": list(live_campaigns)}}
     ).deleted_count
     used_ad_ids = set(
         database.registrations.distinct("ad_id", {"business_id": business_id})
     )
     deleted_ads = database.ads.delete_many(
-        {
-            "business_id": business_id,
-            "ad_id": {"$nin": list(used_ad_ids)},
-        }
+        {"business_id": business_id, "ad_id": {"$nin": list(used_ad_ids)}}
     ).deleted_count
-    return {
-        "registrations_deleted": deleted_regs,
-        "ads_deleted": deleted_ads,
-    }
+    return {"registrations_deleted": deleted_regs, "ads_deleted": deleted_ads}
 
 
 def attach_ads(campaign_id: str, ad_ids: Iterable[str], business_id: str) -> Dict[str, Any]:
@@ -516,7 +526,9 @@ def detach_ads(campaign_id: str, ad_ids: Iterable[str], business_id: str) -> Dic
     return _clean(result)
 
 
-# Registrations CRUD ----------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Registrations CRUD + helpers
+# -----------------------------------------------------------------------------
 
 def create_registration(data: Dict[str, Any], business_id: str) -> Dict[str, Any]:
     scoped_id = _require_business_id(business_id)
@@ -570,30 +582,86 @@ def list_registrations(
     )
 
 
-def update_registration(registration_id: str, patch: Dict[str, Any], business_id: str) -> Dict[str, Any]:
-    scoped_id = _require_business_id(business_id)
-    payload = validate_registration_update(patch)
-    if not payload:
-        raise PayloadValidationError("Nothing to update.")
-    payload = _sanitize(dict(payload))
-    if not isinstance(payload, dict):
-        payload = {}
-    payload["updated_at"] = datetime.utcnow()
-    result = registrations_collection().find_one_and_update(
-        {"registration_id": registration_id, "business_id": scoped_id},
-        {"$set": payload},
-        return_document=True,
-    )
-    if not result:
-        raise RepositoryError("Registration not found.")
-    return _clean(result)
+def _campaign_name_map(db, business_id: str) -> Dict[str, str]:
+    """Map campaign_id -> campaign name for a business."""
+    return {
+        c.get("campaign_id"): (c.get("name") or "(unnamed)")
+        for c in db.campaigns.find({"business_id": business_id}, {"campaign_id": 1, "name": 1, "_id": 0})
+        if c.get("campaign_id")
+    }
 
 
-def delete_registration(registration_id: str, business_id: str) -> bool:
-    result = registrations_collection().delete_one(
-        {"registration_id": registration_id, "business_id": _require_business_id(business_id)}
+def list_registrations_with_names(
+    *, business_id: str, query: Optional[dict] = None, skip: int = 0, limit: int = 50, sort: Optional[list] = None, db=None
+) -> List[dict]:
+    """Return registrations and attach campaign_name."""
+    col = registrations_collection(db)
+    q = {"business_id": business_id}
+    if query:
+        q.update(query)
+    sort = sort or [("timestamp", -1)]
+    docs = list(col.find(q).sort(sort).skip(skip).limit(limit))
+    cmap = _campaign_name_map(_db_or_default(db), business_id)
+    for d in docs:
+        cid = d.get("campaign_id")
+        d["campaign_name"] = cmap.get(cid, "(unknown)")
+    return docs
+
+
+def read_registration(*, business_id: str, registration_id: str, db=None) -> dict | None:
+    return registrations_collection(db).find_one(
+        {"business_id": business_id, "registration_id": registration_id}
     )
-    return result.deleted_count > 0
+
+
+def update_registration(*, business_id: str, registration_id: str, patch: dict, db=None) -> int:
+    """Patch safe fields. Converts types where reasonable."""
+    allowed_keys = {
+        "campaign_id",
+        "ad_id",
+        "source",
+        "messages",
+        "spent",
+        "reach",
+        "impressions",
+        "clicks",
+        "user_id",
+        "cost",
+        "timestamp",
+    }
+    data = {k: v for k, v in patch.items() if k in allowed_keys}
+    # numeric coercion
+    for k in ("messages", "reach", "impressions", "clicks", "user_id"):
+        if k in data and data[k] not in (None, ""):
+            try:
+                data[k] = int(data[k])
+            except Exception:
+                pass
+    for k in ("spent", "cost"):
+        if k in data and data[k] not in (None, ""):
+            try:
+                data[k] = float(data[k])
+            except Exception:
+                pass
+    # timestamp -> datetime
+    if "timestamp" in data and isinstance(data["timestamp"], str):
+        try:
+            data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+        except Exception:
+            data.pop("timestamp", None)
+
+    data["updated_at"] = datetime.utcnow()
+    res = registrations_collection(db).update_one(
+        {"business_id": business_id, "registration_id": registration_id},
+        {"$set": data},
+    )
+    return res.modified_count
+
+
+def delete_registration(*, business_id: str, registration_id: str, db=None) -> int:
+    return registrations_collection(db).delete_one(
+        {"business_id": business_id, "registration_id": registration_id}
+    ).deleted_count
 
 
 def export_registrations_csv(query: Dict[str, Any], *, business_id: str) -> io.BytesIO:
@@ -641,7 +709,9 @@ def export_registrations_csv(query: Dict[str, Any], *, business_id: str) -> io.B
     return out
 
 
-# Seeder ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Seeder
+# -----------------------------------------------------------------------------
 
 def seed_demo_data(days: int = 30, registrations: int = 200) -> Dict[str, int]:
     """Populate MongoDB with demo campaigns, ads, and registrations for each business."""
@@ -682,6 +752,7 @@ def seed_demo_data(days: int = 30, registrations: int = 200) -> Dict[str, int]:
         },
     ]
 
+    # Ensure businesses
     for entry in seeds:
         existing = db.businesses.find_one({"business_id": entry["business_id"]})
         if not existing:
@@ -696,15 +767,13 @@ def seed_demo_data(days: int = 30, registrations: int = 200) -> Dict[str, int]:
             )
             stats["businesses"] += 1
 
+    # Ads, Campaigns, and Registrations
     for entry in seeds:
         business_id = entry["business_id"]
         ad_templates = entry["ad_templates"]
         if db.ads.count_documents({"business_id": business_id}) == 0:
             for template in ad_templates:
-                create_ad(
-                    {**template, "status": "active"},
-                    business_id=business_id,
-                )
+                create_ad({**template, "status": "active"}, business_id=business_id)
                 stats["ads"] += 1
 
         ad_docs = list(db.ads.find({"business_id": business_id}, {"ad_id": 1}))
@@ -771,4 +840,3 @@ def seed_demo_data(days: int = 30, registrations: int = 200) -> Dict[str, int]:
 
 def _new_id() -> str:
     return ulid_new().str
-
