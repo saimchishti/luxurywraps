@@ -30,6 +30,27 @@ from streamlit_app.utils.constants import (
 from streamlit_app.utils.filters import use_start_date
 from streamlit_app.utils.formatting import format_currency, format_datetime
 
+# --- Pagination helper (registrations page only)
+def _render_pagination(current_page: int, total: int, page_size: int) -> int:
+    import math
+
+    total_pages = max(1, math.ceil((total or 0) / max(1, page_size or 1)))
+    col_prev, col_center, col_next = st.columns([1, 2, 1])
+
+    with col_prev:
+        if st.button("Previous", disabled=current_page <= 1, key="reg_prev_btn"):
+            current_page = max(1, current_page - 1)
+
+    with col_center:
+        st.write(f"Page {current_page} / {total_pages}")
+
+    with col_next:
+        last_page = current_page >= total_pages
+        if st.button("Next", disabled=last_page, key="reg_next_btn"):
+            current_page = min(total_pages, current_page + 1)
+
+    return current_page
+
 # Global start-date filter (left rail)
 start_dt = use_start_date()
 FILTER_STATE_KEY = "registration_filters"
@@ -334,7 +355,11 @@ def main() -> None:
 
     # filters + fetch the current page
     filters = _render_filters(campaigns, ads)
-    current_page = st.session_state.get("registrations_page", 1)
+
+    # current page
+    current_page = int(st.session_state.get("registrations_page", 1))
+
+    # fetch data (existing list_registrations call)
     response = list_registrations(
         business_id=business_id,
         campaign_ids=filters["campaign_ids"],
@@ -346,13 +371,16 @@ def main() -> None:
         page_size=25,
     )
 
-    # pagination controls
-    st.session_state["registrations_page"] = _render_pagination(
-        current_page, response["total"], response["page_size"]
-    )
-
     # table display
     _render_table(response, filters, campaigns)
+
+    # robust totals (avoid KeyError if API shape changes)
+    total = int(response.get("total", 0)) if isinstance(response, dict) else 0
+    page_size = int(response.get("page_size", 25)) if isinstance(response, dict) else 25
+
+    # draw controls & store back
+    current_page = _render_pagination(current_page, total, page_size)
+    st.session_state["registrations_page"] = current_page
 
     # ---- Edit a registration (friendly names)
     st.subheader("Edit a registration")
