@@ -10,18 +10,16 @@ import pandas as pd
 import streamlit as st
 
 from streamlit_app.services.repositories import (
-    RepositoryError,
-    # ads/campaigns/list/export/create
-    list_ads,
-    list_campaigns,
-    list_registrations,
-    create_registration,
-    export_registrations_csv,
-    # registrations edit helpers
     list_registrations_with_names,
     read_registration,
     update_registration,
     delete_registration,
+    list_campaigns,
+    list_ads,
+    list_registrations,
+    export_registrations_csv,
+    RepositoryError,
+    create_registration,
 )
 
 from streamlit_app.utils.auth import do_rerun
@@ -243,104 +241,6 @@ def _render_table(payload: dict, filters: Dict[str, list], campaigns: List[dict]
     return df
 
 
-def _render_editor(df: pd.DataFrame, campaigns: List[dict], business_id: str) -> None:
-    """Edit/delete one registration from the current page."""
-    st.markdown("### Edit a registration")
-
-    if df.empty or "registration_id" not in df.columns:
-        st.caption("Nothing to edit on this page.")
-        return
-
-    ids_on_page = list(df["registration_id"].dropna().astype(str))
-    reg_id = st.selectbox("Pick a registration to edit", ["(select)"] + ids_on_page, index=0)
-    if not reg_id or reg_id == "(select)":
-        return
-
-    row = read_registration(business_id=business_id, registration_id=reg_id)
-    if not row:
-        st.warning("Registration not found.")
-        return
-
-    # Build campaign name <-> id maps
-    id_to_name = {
-        c.get("campaign_id"): (c.get("name") or "(unnamed)")
-        for c in campaigns
-        if c.get("campaign_id")
-    }
-    name_to_id = {v: k for k, v in id_to_name.items()}
-    current_name = id_to_name.get(row.get("campaign_id"), "(unknown)")
-
-    camp_choice = st.selectbox(
-        "Campaign",
-        options=[current_name] + sorted([n for n in name_to_id.keys() if n != current_name]),
-        index=0,
-    )
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        ad_id = st.text_input("Ad ID", value=str(row.get("ad_id") or ""))
-        source = st.text_input("Source", value=str(row.get("source") or ""))
-        ts_val = row.get("timestamp")
-        ts_text = ts_val.isoformat() if isinstance(ts_val, datetime) else (ts_val or "")
-        timestamp = st.text_input("Timestamp (ISO)", value=ts_text)
-    with col2:
-        messages = st.number_input("Messages", value=int(row.get("messages") or 0), step=1)
-        reach = st.number_input("Reach", value=int(row.get("reach") or 0), step=1)
-        impressions = st.number_input("Impressions", value=int(row.get("impressions") or 0), step=1)
-        clicks = st.number_input("Clicks", value=int(row.get("clicks") or 0), step=1)
-    with col3:
-        user_id = st.number_input("Customers / user_id", value=int(row.get("user_id") or 0), step=1)
-        spent = st.number_input("Spent", value=float(row.get("spent") or 0.0))
-        cost = st.number_input("Cost", value=float(row.get("cost") or 0.0))
-
-    save = st.button("Save changes")
-    delete = st.button("Delete this registration")
-
-    if save:
-        patch = {
-            "campaign_id": name_to_id.get(camp_choice, row.get("campaign_id")),
-            "ad_id": ad_id.strip() or None,
-            "source": source.strip() or None,
-            "messages": messages,
-            "reach": reach,
-            "impressions": impressions,
-            "clicks": clicks,
-            "user_id": user_id,
-            "spent": spent,
-            "cost": cost,
-            "timestamp": timestamp.strip() or None,
-        }
-        n = update_registration(
-            business_id=business_id, registration_id=reg_id, patch=patch
-        )
-        if n:
-            st.success("Saved.")
-            do_rerun()
-        else:
-            st.info("No changes detected.")
-
-    if delete:
-        removed = delete_registration(business_id=business_id, registration_id=reg_id)
-        if removed:
-            st.success("Deleted.")
-            do_rerun()
-        else:
-            st.warning("Nothing deleted.")
-
-
-# ------------------------------
-# Pagination / Export / Upload
-# ------------------------------
-def _render_pagination(current_page: int, total: int, page_size: int) -> int:
-    cols = st.columns(3)
-    if cols[0].button("Previous", disabled=current_page <= 1):
-        current_page -= 1
-    cols[1].write(f"Page {current_page}")
-    if cols[2].button("Next", disabled=current_page * page_size >= total):
-        current_page += 1
-    return current_page
-
-
 def _render_export(filters: Dict[str, list], business_id: str, start_dt: datetime) -> None:
     query = {
         "campaign_id": {"$in": filters["campaign_ids"]} if filters["campaign_ids"] else None,
@@ -427,6 +327,7 @@ def main() -> None:
 
     # options used by create, filters, and editor
     campaigns, ads = _fetch_options(business_id, start_dt)
+    ad_title_by_id = {a.get("ad_id"): (a.get("title") or "(untitled)") for a in ads}
 
     # create
     _render_create_registration(business_id, campaigns, ads)
@@ -450,11 +351,137 @@ def main() -> None:
         current_page, response["total"], response["page_size"]
     )
 
-    # table (returns df that powers the editor)
-    df_shown = _render_table(response, filters, campaigns)
+    # table display
+    _render_table(response, filters, campaigns)
 
-    # single-row editor / delete
-    _render_editor(df_shown, campaigns, business_id)
+    # ---- Edit a registration (friendly names)
+    st.subheader("Edit a registration")
+
+    # Pull recent rows with campaign names for readable labels.
+    # Keep the same start date filter you already use elsewhere.
+    rows_for_picker = list_registrations_with_names(
+        business_id=business_id,
+        query={"timestamp": {"$gte": start_dt}},
+        skip=0,
+        limit=500,
+        sort=[("timestamp", -1)],
+    )
+
+    def _row_label(d: dict) -> str:
+        ts = d.get("timestamp")
+        try:
+            ts_str = format_datetime(ts) if ts else ""
+        except Exception:
+            ts_str = str(ts or "")
+        camp = d.get("campaign_name") or "(unknown campaign)"
+        adt = ad_title_by_id.get(d.get("ad_id"), "—")
+        src = d.get("source") or "—"
+        rid = d.get("registration_id", "")
+        rid_short = f" · {rid[-6:]}" if rid else ""
+        return f"{camp} — {adt} — {src} — {ts_str}{rid_short}"
+
+    selected_row = st.selectbox(
+        "Pick a registration to edit",
+        options=[None] + rows_for_picker,
+        format_func=lambda d: "(select)" if d is None else _row_label(d),
+        key="edit_reg_select",
+    )
+
+    if selected_row:
+        reg_id = selected_row["registration_id"]
+        row = read_registration(business_id=business_id, registration_id=reg_id)
+        if not row:
+            st.warning("Registration not found.")
+        else:
+            with st.form("edit-registration"):
+                # prefill fields from row; keep existing field names/validators
+                col1, col2 = st.columns(2)
+                with col1:
+                    source = st.text_input("Source", value=row.get("source") or "")
+                    messages = st.number_input(
+                        "Messages", min_value=0, value=int(row.get("messages") or 0), step=1
+                    )
+                    spent = st.number_input(
+                        "Spent",
+                        min_value=0.0,
+                        value=float(row.get("spent") or 0.0),
+                        step=1.0,
+                        format="%.2f",
+                    )
+                    reach = st.number_input(
+                        "Reach", min_value=0, value=int(row.get("reach") or 0), step=1
+                    )
+                with col2:
+                    impressions = st.number_input(
+                        "Impressions", min_value=0, value=int(row.get("impressions") or 0), step=1
+                    )
+                    clicks = st.number_input(
+                        "Clicks", min_value=0, value=int(row.get("clicks") or 0), step=1
+                    )
+                    cost = st.number_input(
+                        "Cost",
+                        min_value=0.0,
+                        value=float(row.get("cost") or 0.0),
+                        step=1.0,
+                        format="%.2f",
+                    )
+                    user_id = st.text_input("User ID", value=str(row.get("user_id") or ""))
+
+                # timestamp split into date + time for convenient editing
+                ts_val = row.get("timestamp")
+                if isinstance(ts_val, str):
+                    try:
+                        from datetime import datetime as _dt
+
+                        ts_val = _dt.fromisoformat(ts_val)
+                    except Exception:
+                        ts_val = None
+                dt_default = ts_val.date() if ts_val else datetime.utcnow().date()
+                tm_default = (
+                    ts_val.time().replace(microsecond=0)
+                    if ts_val
+                    else datetime.utcnow().time().replace(microsecond=0)
+                )
+                dt_part = st.date_input("Date", value=dt_default)
+                tm_part = st.time_input("Time", value=tm_default)
+
+                # optional meta field
+                raw_meta = row.get("meta") or {}
+                meta_text = st.text_area(
+                    "Meta (JSON)", value=json.dumps(raw_meta, ensure_ascii=False, indent=2)
+                )
+
+                save = st.form_submit_button("Save changes")
+
+            if save:
+                # parse meta JSON
+                meta_payload = {}
+                if meta_text.strip():
+                    try:
+                        meta_payload = json.loads(meta_text)
+                    except Exception:
+                        st.error("Meta must be valid JSON.")
+                        st.stop()
+
+                ts_combined = datetime.combine(dt_part, tm_part)
+                patch = {
+                    "source": source or None,
+                    "messages": int(messages or 0),
+                    "spent": float(spent or 0.0),
+                    "reach": int(reach or 0),
+                    "impressions": int(impressions or 0),
+                    "clicks": int(clicks or 0),
+                    "cost": float(cost or 0.0),
+                    "user_id": int(user_id) if str(user_id).isdigit() else (user_id or None),
+                    "timestamp": ts_combined.isoformat(),
+                    "meta": meta_payload,
+                }
+                try:
+                    update_registration(business_id=business_id, registration_id=reg_id, patch=patch)
+                    st.toast("Registration updated.")
+                    do_rerun()
+                except RepositoryError as exc:
+                    st.error(f"Failed to update: {exc}")
 
     # export + upload
     _render_export(filters, business_id, start_dt)
